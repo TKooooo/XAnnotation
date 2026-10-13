@@ -1,0 +1,73 @@
+{
+  // ============================================================
+  //  X-批注（XAnnotation）VSCode 多根工作区
+  //  双击本文件即可用 VSCode 打开完整开发环境
+  // ============================================================
+  "folders": [
+    {
+      "name": "X-批注 源码",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "window.title": "X-批注 · ${activeEditorShort}${separator}${rootName}",
+    "files.encoding": "utf8bom",
+    "files.eol": "\r\n",
+
+    "files.exclude": {
+      "**/obj": true,
+      "**/bin": true,
+      "bin-acad": true,
+      "bin-acad2012": true,
+      "bin-acad2014": true,
+      "bin-acad2013-2024": true,
+      "bin-acad2025-2027": true,
+      "bin-gscad": true,
+      "bin-gscad2026": true,
+      "bin-zwcad": true,
+      "_build_check": true
+    },
+    "search.exclude": {
+      "**/obj": true,
+      "**/bin*": true
+    },
+
+    "dotnet.defaultSolution": "disable",
+    "omnisharp.useModernNet": true,
+
+    "files.associations": {
+      "*.csproj": "xml",
+      "*.props": "xml",
+      "*.targets": "xml"
+    },
+
+    "editor.rulers": [120],
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "[csharp]": { "editor.tabSize": 4, "editor.formatOnSave": false },
+    "[xml]": { "editor.tabSize": 2 },
+    "[markdown]": { "editor.wordWrap": "on" },
+
+    "cSpell.language": "en,zh-CN",
+    "cSpell.words": [
+      "AutoCAD", "ZWCAD", "GstarCAD", "Gscad", "Acad",
+      "acdbmgd", "acmgd", "accoremgd",
+      "ZwManaged", "ZwDatabaseMgd",
+      "GcDbMgd", "GcMgd", "GcCoreMgd",
+      "Annotation", "XData", "XRecord", "ObjectARX", "NETLOAD", "AnyCPU",
+      "ValueTuple", "Jig", "WorldDraw", "SubEntityTraits", "MText", "Polyline",
+      "云线", "引线", "批注", "批量批注"
+    ],
+
+    "terminal.integrated.defaultProfile.windows": "Command Prompt"
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-dotnettools.csharp",
+      "ms-dotnettools.csdevkit",
+      "streetsidesoftware.code-spell-checker",
+      "streetsidesoftware.code-spell-checker-chinese-simplified",
+      "redhat.vscode-xml"
+    ]
+  }
+}
