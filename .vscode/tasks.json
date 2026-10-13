@@ -1,0 +1,93 @@
+{
+  // ============================================================
+  //  X-批注 编译任务
+  //  用法：Ctrl+Shift+B 直接跑默认任务；或 Ctrl+Shift+P →
+  //        "Tasks: Run Task" 选具体目标
+  // ============================================================
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "构建：全部目标（auto）",
+      "type": "shell",
+      "command": "build.cmd",
+      "args": ["auto"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "构建：AutoCAD 2025~2027（net8）",
+      "type": "shell",
+      "command": "build.cmd",
+      "args": ["2025"],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "构建：AutoCAD 2015~2024（net45）",
+      "type": "shell",
+      "command": "build.cmd",
+      "args": ["legacy"],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "构建：AutoCAD 2013~2014（net40）",
+      "type": "shell",
+      "command": "build.cmd",
+      "args": ["2014"],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "构建：AutoCAD 2012（net40）",
+      "type": "shell",
+      "command": "build.cmd",
+      "args": ["2012"],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "构建：中望 ZWCAD",
+      "type": "shell",
+      "command": "build.cmd",
+      "args": ["zwcad"],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "构建：浩辰 GstarCAD",
+      "type": "shell",
+      "command": "build.cmd",
+      "args": ["gscad"],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "构建：全部（含部署）",
+      "type": "shell",
+      "command": "build.cmd",
+      "args": ["all"],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "清理：删除所有 bin/obj",
+      "type": "shell",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "for /d %d in (bin-acad bin-acad2012 bin-acad2014 bin-acad2013-2024 bin-acad2025-2027 bin-zwcad bin-gscad src\\obj) do @if exist %d rmdir /s /q %d"
+      ],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    }
+  ]
+}

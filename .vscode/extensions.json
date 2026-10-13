@@ -1,0 +1,15 @@
+{
+  // 打开本工程时 VSCode 建议安装的扩展
+  "recommendations": [
+    "ms-dotnettools.csharp",
+    "ms-dotnettools.csdevkit",
+    "ms-dotnettools.vscode-dotnet-runtime",
+    "streetsidesoftware.code-spell-checker",
+    "streetsidesoftware.code-spell-checker-chinese-simplified",
+    "redhat.vscode-xml",
+    "editorconfig.editorconfig"
+  ],
+  "unwantedRecommendations": [
+    "ms-vscode.mono-debug"
+  ]
+}

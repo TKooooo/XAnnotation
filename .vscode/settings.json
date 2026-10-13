@@ -1,0 +1,70 @@
+// ============================================================
+//  X-批注（XAnnotation）VSCode 工作区配置
+//  多目标 .NET 插件（net40 / net45 / net472 / net8.0-windows）
+//  用 dotnet CLI 编译，无需安装 Visual Studio
+// ============================================================
+{
+  "files.encoding": "utf8bom",
+  "files.eol": "\r\n",
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+
+  // 产物目录折叠起来，避免干扰源码浏览
+  "files.exclude": {
+    "**/obj": true,
+    "**/bin": true,
+    "bin-acad": true,
+    "bin-acad2012": true,
+    "bin-acad2014": true,
+    "bin-acad2013-2024": true,
+    "bin-acad2025-2027": true,
+    "bin-gscad": true,
+    "bin-zwcad": true,
+    "_build_check": true
+  },
+  "search.exclude": {
+    "**/obj": true,
+    "**/bin*": true
+  },
+
+  // C# / OmniSharp
+  "dotnet.defaultSolution": "disable",
+  "omnisharp.useModernNet": true,
+  "omnisharp.enableRoslynAnalyzers": true,
+
+  // 把 csproj / props 当 XML 处理，获得语法高亮
+  "files.associations": {
+    "*.csproj": "xml",
+    "*.props": "xml",
+    "*.targets": "xml"
+  },
+
+  // 编辑习惯（源码里中文注释较多，行宽放宽到 120）
+  "editor.rulers": [120],
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  "[csharp]": {
+    "editor.tabSize": 4,
+    "editor.formatOnSave": false
+  },
+  "[xml]": {
+    "editor.tabSize": 2
+  },
+  "[markdown]": {
+    "editor.wordWrap": "on"
+  },
+
+  // 拼写检查词表：加进项目专有名词，免得满屏波浪线
+  "cSpell.language": "en,zh-CN",
+  "cSpell.words": [
+    "AutoCAD", "ZWCAD", "GstarCAD", "Gscad", "Acad",
+    "acdbmgd", "acmgd", "accoremgd",
+    "ZwManaged", "ZwDatabaseMgd",
+    "GcDbMgd", "GcMgd", "GcCoreMgd",
+    "Annotation", "XData", "XRecord", "ObjectARX", "NETLOAD", "AnyCPU",
+    "ValueTuple", "Jig", "WorldDraw", "SubEntityTraits", "MText", "Polyline",
+    "云线", "引线", "批注", "批量批注"
+  ],
+
+  "terminal.integrated.defaultProfile.windows": "Command Prompt"
+}

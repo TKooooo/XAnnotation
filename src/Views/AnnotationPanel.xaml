@@ -1,0 +1,102 @@
+<Window x:Class="XAnnotation.Views.AnnotationPanel"
+        x:ClassModifier="internal"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="X-批注" Width="292"
+        MinWidth="272"
+        SizeToContent="Height"
+        ResizeMode="CanResize"
+        Topmost="True" ShowInTaskbar="False"
+        WindowStyle="ToolWindow"
+        PreviewKeyDown="Panel_PreviewKeyDown"
+        Background="{DynamicResource BackgroundBrush}">
+    <Window.Resources>
+        <ResourceDictionary Source="../Themes/XTheme.xaml"/>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- 底部操作栏 -->
+        <Border DockPanel.Dock="Bottom" Padding="10,8" Background="{DynamicResource SurfaceBrush}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Button x:Name="SettingsButton" Grid.Column="0" Content="批注设置…"
+                        Style="{DynamicResource SecondaryButton}" Click="Settings_Click" MinWidth="88"/>
+                <TextBlock Grid.Column="1" Text="勾好选项 → 回图纸即开始 · Esc 退出"
+                           Style="{StaticResource StatusText}" HorizontalAlignment="Right" Margin="8,0,0,0"/>
+            </Grid>
+        </Border>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12,10">
+            <StackPanel>
+                <!-- 批注外形：点任一外形按钮即以其开始（默认「矩形」 / 当前外形为蓝底）。
+                     「矩形」＝按「批注设置」里的云线外形（矩形/菱形/椭圆）来画；
+                     「PL线」＝在图纸上逐点画出闭合折线，云线沿该自定义形状生成；
+                     「基点」＝只点一个基点，引线从基点直连到批注文本框（不画云线）。
+                     这里刻意用 Button 而非 RadioButton：AutoCAD 宿主下点 RadioButton 会走
+                     UpdateRadioButtonGroup() 并触发致命错误（已由崩溃转储确认），Button 无此问题。
+                     标题与按钮下方**不放任何说明文字**（用户要求：这一项的操作说明不在对话框里显示）。 -->
+                <TextBlock Text="批注外形" Style="{StaticResource SectionHeader}" Margin="0,2,0,6"/>
+                <UniformGrid Columns="3" Margin="0,0,0,2">
+                    <Button x:Name="ShapeRectButton" Content="矩形" Click="Shape_Click" Tag="矩形"
+                            Style="{DynamicResource PrimaryButton}" MinWidth="0" Margin="0,0,4,0" Padding="0"/>
+                    <Button x:Name="ShapePlineButton" Content="PL线" Click="Shape_Click" Tag="PL线"
+                            Style="{DynamicResource SecondaryButton}" MinWidth="0" Margin="2,0,2,0" Padding="0"/>
+                    <Button x:Name="ShapeBasePointButton" Content="基点" Click="Shape_Click" Tag="基点"
+                            Style="{DynamicResource SecondaryButton}" MinWidth="0" Margin="4,0,0,0" Padding="0"/>
+                </UniformGrid>
+
+                <Rectangle Style="{StaticResource SectionSeparator}"/>
+
+                <!-- 绘制方式：面板打开时处于"待命"状态，不抢 CAD 命令（CAD 命令一跑起来就会独占鼠标，
+                     面板上的勾选框就点不动了）。先在这里勾好，再把鼠标移回图纸即按当前外形+选项开始；
+                     也可以直接点外形按钮或按回车开始。标题下同样不放说明文字。 -->
+                <TextBlock Text="绘制方式" Style="{StaticResource SectionHeader}" Margin="0,4,0,6"/>
+                <CheckBox x:Name="ContinuousCheck" Content="连续绘制（一处完成自动继续）"
+                          Checked="Option_Changed" Unchecked="Option_Changed"/>
+                <CheckBox x:Name="MultiModeCheck" Content="多对一批注（先选多个范围再填内容，仅「矩形」外形）" Margin="0,4,0,0"
+                          Checked="Option_Changed" Unchecked="Option_Changed"/>
+                <CheckBox x:Name="CloudOnlyCheck" Content="仅绘云线（无文字/引线，优先于多对一）" Margin="0,4,0,0"
+                          Checked="Option_Changed" Unchecked="Option_Changed"/>
+
+                <Rectangle Style="{StaticResource SectionSeparator}"/>
+
+                <!-- 本次批注参数（跟随设置，可在「批注设置」中完整调整） -->
+                <TextBlock Text="本次参数" Style="{StaticResource SectionHeader}" Margin="0,4,0,6"/>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="56"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="专业" Style="{StaticResource FieldLabelLeft}"/>
+                    <ComboBox x:Name="DisciplineCombo" Grid.Row="0" Grid.Column="1" IsEditable="True"/>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="批注人" Style="{StaticResource FieldLabelLeft}"/>
+                    <TextBox x:Name="AuthorText" Grid.Row="1" Grid.Column="1"/>
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="云线样式" Style="{StaticResource FieldLabelLeft}"/>
+                    <ComboBox x:Name="CloudStyleCombo" Grid.Row="2" Grid.Column="1"/>
+
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="角色" Style="{StaticResource FieldLabelLeft}"/>
+                    <ComboBox x:Name="RoleCombo" Grid.Row="3" Grid.Column="1" IsEditable="True"/>
+
+                    <TextBlock Grid.Row="4" Grid.Column="0" Text="编号" Style="{StaticResource FieldLabelLeft}"/>
+                    <CheckBox x:Name="AutoNumberCheck" Grid.Row="4" Grid.Column="1" Content="自动编号" VerticalAlignment="Center"/>
+                </Grid>
+
+                <CheckBox x:Name="DoubleClickEditCheck" Content="允许双击编辑" Margin="0,6,0,0"/>
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>

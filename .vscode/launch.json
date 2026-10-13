@@ -1,0 +1,32 @@
+{
+  // ============================================================
+  //  调试配置
+  //  .NET Framework 插件不能直接 F5 启动宿主，需「附加到进程」。
+  //  用法：先手动启动 AutoCAD（或 ZWCAD / 浩辰），
+  //        再在 VSCode 里选 "附加到 AutoCAD"，在 NETLOAD 前下断点。
+  // ============================================================
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "附加到 AutoCAD (acad.exe)",
+      "type": "coreclr",
+      "request": "attach",
+      "processName": "acad",
+      "justMyCode": false
+    },
+    {
+      "name": "附加到中望 ZWCAD (ZWCAD.exe)",
+      "type": "coreclr",
+      "request": "attach",
+      "processName": "ZWCAD",
+      "justMyCode": false
+    },
+    {
+      "name": "附加到浩辰 GstarCAD",
+      "type": "coreclr",
+      "request": "attach",
+      "processName": "gcad",
+      "justMyCode": false
+    }
+  ]
+}

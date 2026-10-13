@@ -1,0 +1,63 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+  <!--
+    AutoCAD 2012 ~ 2014 构建（.NET 4.0）。
+
+    为什么必须单独一个工程，而不是"把 net45 的版本号改一改"：
+      1) 2013 的 "The Big Split" 是 .NET API 的**二进制兼容断点**——API 实现从 acad.exe 迁到 AcCore.dll、
+         声明从 acmgd.dll 迁到 accoremgd.dll。针对 2013+ 编译的程序集在 2012 上**加载不了**，
+         所以 2012 必须对着它自己的 acdbmgd.dll / acmgd.dll 编译。
+      2) 2012/2013/2014 都跑在 .NET 4.0（CLR 4.0.30319）。net45 产物在只装了 .NET 4.0 的机器上会加载失败，
+         而 AutoCAD 2012 全新安装带来的就是 .NET 4.0，所以这里钉 net40。
+
+    与其它目标共用全部源码，差异只靠三个编译符号表达：
+      AUTOCAD             —— 宿主是 AutoCAD（非 ZWCAD）
+      ACAD_PRE2013        —— 2013 之前没有 ApplicationServices.Core 命名空间，入口是 ApplicationServices.Application
+      WPF_NO_PIXELSPERDIP —— FormattedText 还没有 pixelsPerDip 重载（4.6.2 才加入）
+
+    注意这里**不能**定义 ACAD_CORE：那个符号是用来隔离 accoremgd 相关代码的，2012 没有 accoremgd。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net40</TargetFramework>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>$(RepoRoot)bin-acad2012\</OutputPath>
+    <OutputType>Library</OutputType>
+    <RootNamespace>XAnnotation</RootNamespace>
+    <AssemblyName>XAnnotation.AutoCAD2012</AssemblyName>
+    <!-- AutoCAD 2012 同时存在 32 位与 64 位版本（当年大量装在 32 位 XP/7 上），
+         库必须是 AnyCPU 才能在两边都加载；x64 产物在 32 位 CAD 里加载不了。 -->
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <!-- 源码只用得到 C# 7.3 及更早的语法（无元组解构、无 using 声明、无 switch 表达式），钉住更安全。 -->
+    <LangVersion>7.3</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <UseWPF>true</UseWPF>
+    <DefineConstants>AUTOCAD;ACAD_PRE2013;WPF_NO_PIXELSPERDIP</DefineConstants>
+    <!-- 2012 的托管程序集不在 NuGet 上（AutoCAD.NET 包最老只到 20.0.0 = AutoCAD 2015），
+         只能引用本机安装目录。默认路径不对时用命令行覆盖，例如：
+           dotnet build src\XAnnotation.AutoCAD2012.csproj -c Release -p:Acad2012Dir="D:\AutoCAD 2012"
+         只要目录里有 acdbmgd.dll 和 acmgd.dll 即可，不要求是完整安装。 -->
+    <Acad2012Dir Condition="'$(Acad2012Dir)' == ''">C:\Program Files\Autodesk\AutoCAD 2012</Acad2012Dir>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Private=false：运行时用 CAD 宿主自带的同名程序集，不要把这两个 DLL 拷进产物目录（会与宿主冲突）。 -->
+    <Reference Include="acdbmgd"><HintPath>$(Acad2012Dir)\acdbmgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="acmgd"><HintPath>$(Acad2012Dir)\acmgd.dll</HintPath><Private>false</Private></Reference>
+    <!-- System.ValueTuple：AnnotationService.UcsAlignedExtents 用了命名元组返回值，net40 上没有该类型。 -->
+    <PackageReference Include="System.ValueTuple" Version="4.5.0" />
+    <!-- 只装 .NET SDK（未装 Visual Studio）的机器上没有 net40 参考程序集，靠这个包补齐，避免 MSB3644。 -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Xaml" />
+  </ItemGroup>
+
+  <!-- 缺 DLL 时给出人话提示，而不是抛一堆 CS0246 / MSB3243。
+       Error 是 Task 不是 Item，必须放在 Target 里。 -->
+  <Target Name="EnsureAcad2012Assemblies" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(Acad2012Dir)\acdbmgd.dll') Or !Exists('$(Acad2012Dir)\acmgd.dll')"
+           Text="未找到 AutoCAD 2012 的托管程序集（acdbmgd.dll / acmgd.dll）。请安装 AutoCAD 2012，或把这两个 DLL 拷到任意目录后用 -p:Acad2012Dir=&quot;该目录&quot; 指定。当前 Acad2012Dir=$(Acad2012Dir)" />
+  </Target>
+</Project>

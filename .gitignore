@@ -1,0 +1,73 @@
+# ============================================================
+#  X-批注（XAnnotation）源码仓库
+#  只跟踪源码与构建脚本；产物目录（bin*/obj*）一律不入库。
+# ============================================================
+
+# ---------- IDE / 编辑器 ----------
+.vs/
+.idea/
+*.suo
+*.user
+*.rsuser
+*.DotSettings.user
+*.userosscache
+*.sln.docstates
+
+# VSCode：忽略个人设置，但保留团队共享的工作区配置
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# ---------- 构建产物（所有 bin*/obj* 目录） ----------
+[Bb]in/
+[Oo]bj/
+bin-acad/
+bin-acad2012/
+bin-acad2014/
+bin-acad2013-2024/
+bin-acad2025-2027/
+bin-zwcad/
+bin-gscad/
+bin-gscad2026/
+_build_check/
+build.log
+*.binlog
+
+# ---------- 部署临时文件（带时间戳的备份 / 被占用副本） ----------
+*.bak-*
+*.inuse-*
+*.NEW.dll
+*.dll.bak
+*_pending_delete_*/
+
+# ---------- 符号与诊断 ----------
+*.pdb
+*.dmp
+*.stackdump
+
+# ---------- 打包产物 ----------
+*.zip
+*.7z
+*.rar
+*.nupkg
+
+# ---------- 操作系统 ----------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ---------- AI 助手内部目录 ----------
+.deepseek/
+.codex/
+.agents/
+.sisyphus/
+.cursor/
+DEEPSEEK_WORKERS.md
+
+# ---------- NuGet ----------
+.nuget/
+packages/
