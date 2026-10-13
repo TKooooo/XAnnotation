@@ -411,28 +411,76 @@ namespace XAnnotation
             return ObjectId.Null;
         }
 
-        /// <summary>用双击点 + 系统变量 PICKBOX 反算光标拾取框的四个角点，再做一次交叉多边形选择。
-        /// 这是在 BeginDoubleClick 里判断"到底点中了什么"最可靠的做法：不依赖预选集状态。</summary>
+        /// <summary>拾取框：四角（喂给选择集）+ 图纸单位下的半边长（近邻兜底用的容差）。</summary>
+        private struct PickBox
+        {
+            /// <summary>交叉选择用的四角（WCS）。</summary>
+            public Point3dCollection Corners;
+            /// <summary>拾取框在图纸单位下的半边长，恒大于 0。</summary>
+            public double WorldHalf;
+        }
+
+        /// <summary>用双击点 + 系统变量 PICKBOX 反算光标拾取框，判断双击点下落着哪条批注。
+        /// <para><b>两级策略</b>：先做交叉选择（首选，快且准），选不到再走"近邻遍历"兜底。</para>
+        /// <para><b>为什么必须有两级</b>：识别"被双击的是哪个实体"原本只靠屏幕像素拾取框，
+        /// 但中望 ZWCAD 的 <c>Editor.PointToScreen</c> 在 <c>BeginDoubleClick</c> 回调里必抛
+        /// <c>InvalidOperationException: 对象的当前状态使该操作无效</c>（2026-10-13 实机日志确证）。
+        /// 原实现"一次失败就整体放弃"，于是中望上整条双击编辑链路失效 ——
+        /// 现场表现就是"中望里双击批注毫无反应、只能用菜单的编辑批注"。</para></summary>
         private static ObjectId HitTestAtPickBox(Document doc, Point3d location)
         {
             try
             {
-                var ed = doc.Editor;
-                // 注意返回类型是 System.Windows.Point（X/Y 为 double），**不是** System.Drawing.Point；
-                // 其逆变换 PointToWorld 也接收 System.Windows.Point。视口号取 1（Autodesk 官方示例同此）。
-                var screen = ed.PointToScreen(location, 1);
-                var half = (double)IntSysVar("PICKBOX", 4);   // PICKBOX 是拾取框的"半个边长"（像素）
-                if (half <= 0) half = 4;                      // PICKBOX=0 时拾取框退化成一个点，兜一个最小框，否则什么都选不到
+                var box = BuildPickBox(doc.Editor, location);
 
-                var corners = new Point3dCollection();
-                corners.Add(ed.PointToWorld(new System.Windows.Point(screen.X - half, screen.Y - half), 1));
-                corners.Add(ed.PointToWorld(new System.Windows.Point(screen.X + half, screen.Y - half), 1));
-                corners.Add(ed.PointToWorld(new System.Windows.Point(screen.X + half, screen.Y + half), 1));
-                corners.Add(ed.PointToWorld(new System.Windows.Point(screen.X - half, screen.Y + half), 1));
+                // 第一步：交叉选择。
+                var hit = HitTestBySelection(doc, box.Corners);
+                if (!hit.IsNull) return hit;
 
-                var result = ed.SelectCrossingPolygon(corners);
-                if (result.Status != PromptStatus.OK || result.Value == null || result.Value.Count == 0) return ObjectId.Null;
+                // 第二步：近邻遍历兜底。不碰任何选择集 / 屏幕坐标 API，
+                // 因此即便宿主的这两种能力都不可用，双击编辑照样成立。
+                return HitTestByProximity(doc, location, box.WorldHalf);
+            }
+            catch (System.Exception ex) { PluginLog.Error("DoubleClick.HitTest", ex); return ObjectId.Null; }
+        }
 
+        /// <summary>按拾取框交叉选择，再从命中的实体里挑出批注。
+        /// <para>两条选择途径依次尝试：<c>SelectCrossingPolygon</c> → <c>SelectCrossingWindow</c>
+        /// （两者语义等价，某些宿主上只实现了后者）。都不可用时返回 <c>ObjectId.Null</c>，由近邻兜底接手。</para></summary>
+        private static ObjectId HitTestBySelection(Document doc, Point3dCollection corners)
+        {
+            PromptSelectionResult result = null;
+            try
+            {
+                result = doc.Editor.SelectCrossingPolygon(corners);
+            }
+            catch (System.Exception ex)
+            {
+                PluginLog.Warning("DoubleClick.HitTest",
+                    "SelectCrossingPolygon 不可用：" + ex.GetType().Name + " - " + ex.Message);
+            }
+
+            // 多边形选择失败时退到等价的窗口选择（对角两点）。
+            if ((result == null || result.Status != PromptStatus.OK) && corners != null && corners.Count >= 3)
+            {
+                try
+                {
+                    result = doc.Editor.SelectCrossingWindow(corners[0], corners[2]);
+                }
+                catch (System.Exception ex)
+                {
+                    PluginLog.Warning("DoubleClick.HitTest",
+                        "SelectCrossingWindow 不可用：" + ex.GetType().Name + " - " + ex.Message);
+                }
+            }
+
+            if (result == null || result.Status != PromptStatus.OK || result.Value == null || result.Value.Count == 0)
+            {
+                return ObjectId.Null;
+            }
+
+            try
+            {
                 // 一条批注由云线/文字/边框/引线多个实体组成，它们携带的是同一个批注 Id（data.Id）；
                 // 重叠处可能同时命中两条不同批注，此时取先选到的并记日志，便于按现场反馈微调。
                 ObjectId hit = ObjectId.Null; string hitAnnotationId = null; var distinct = 0;
@@ -452,7 +500,160 @@ namespace XAnnotation
                 }
                 return hit;
             }
-            catch (System.Exception ex) { PluginLog.Error("DoubleClick.HitTest", ex); return ObjectId.Null; }
+            catch (System.Exception ex) { PluginLog.Error("DoubleClick.HitTest.Read", ex); return ObjectId.Null; }
+        }
+
+        /// <summary>最后一道兜底：在当前空间里找"离双击点最近、且在容差内的批注实体"。
+        /// <para>完全不依赖选择集与屏幕坐标 API —— 中望上这两样都不可靠，而这里只要有事务和实体几何就能工作。
+        /// 先按 XData 过滤出批注实体再算距离，因此额外开销只是对当前空间做一次全表扫描；
+        /// 双击是低频操作，这点代价换来"三个宿主上双击编辑都成立"是划算的。</para></summary>
+        private static ObjectId HitTestByProximity(Document doc, Point3d location, double tolerance)
+        {
+            try
+            {
+                if (tolerance <= 0) tolerance = 1.0;   // 容差为 0 会永远选不到，兜一个最小正数
+
+                ObjectId best = ObjectId.Null;
+                var bestDistance = double.MaxValue;
+                using (var tr = doc.Database.TransactionManager.StartTransaction())
+                {
+                    var space = tr.GetObject(doc.Database.CurrentSpaceId, OpenMode.ForRead) as BlockTableRecord;
+                    if (space == null) return ObjectId.Null;
+
+                    foreach (ObjectId candidate in space)
+                    {
+                        var entity = tr.GetObject(candidate, OpenMode.ForRead, false) as Entity;
+                        if (entity == null || !AnnotationService.TryReadFromEntity(tr, entity, out var ignored)) continue;
+                        var distance = DistanceToPoint(entity, location);
+                        if (distance < bestDistance) { bestDistance = distance; best = candidate; }
+                    }
+                }
+
+                if (best.IsNull || bestDistance > tolerance) return ObjectId.Null;
+                PluginLog.Info("DoubleClick.Hit",
+                    "交叉选择未命中，按近邻兜底命中批注实体 " + best
+                    + "（距双击点 " + bestDistance.ToString("0.###") + "，容差 " + tolerance.ToString("0.###") + "）。");
+                return best;
+            }
+            catch (System.Exception ex)
+            {
+                PluginLog.Error("DoubleClick.HitTest.Proximity", ex);
+                return ObjectId.Null;
+            }
+        }
+
+        /// <summary>实体到某点的距离，用于近邻兜底的排序。
+        /// <para>用<b>包围盒</b>而不是"最近点"来算：<c>GetClosestPointTo</c> 只存在于 <c>Curve</c> 上
+        /// （<c>Entity</c> 没有这个方法，四个宿主上都编译不过），而 <c>GeometricExtents</c> 是每种实体都有的基础能力。
+        /// 包围盒对云线这类不规则轮廓会偏大，但"双击点落在批注轮廓附近"本来就是要判的情形，够用。</para>
+        /// <para>点在盒内时再按"到盒中心的距离"排序（乘 1e-6 压到远小于任何盒外距离），
+        /// 避免两条批注包围盒重叠时永远取到数据库里先出现的那一条。</para>
+        /// <para>算不出来（空实体、退化的范围）返回 <see cref="double.MaxValue"/>，等价于"无视它"。</para></summary>
+        private static double DistanceToPoint(Entity entity, Point3d point)
+        {
+            try
+            {
+                var extents = entity.GeometricExtents;
+                var min = extents.MinPoint;
+                var max = extents.MaxPoint;
+
+                // 到轴对齐包围盒的最短距离（点在盒内时为 0）。
+                var dx = Math.Max(0.0, Math.Max(min.X - point.X, point.X - max.X));
+                var dy = Math.Max(0.0, Math.Max(min.Y - point.Y, point.Y - max.Y));
+                var outside = Math.Sqrt(dx * dx + dy * dy);
+                if (outside > 0) return outside;
+
+                var centerX = (min.X + max.X) * 0.5;
+                var centerY = (min.Y + max.Y) * 0.5;
+                var centerDistance = Math.Sqrt((point.X - centerX) * (point.X - centerX)
+                                             + (point.Y - centerY) * (point.Y - centerY));
+                return centerDistance * 1e-6;
+            }
+            catch (System.Exception ex)
+            {
+                PluginLog.Warning("DoubleClick.Distance", ex.Message);
+                return double.MaxValue;
+            }
+        }
+
+        /// <summary>构造"光标拾取框"，供 <see cref="HitTestBySelection"/> 做交叉选择。
+        /// <para><b>三条路径逐级降级</b>，任意一条成功即返回：</para>
+        /// <list type="number">
+        /// <item>屏幕像素拾取框，视口号 1（Autodesk 官方示例口径）；</item>
+        /// <item>同上，视口号 0（某些宿主只在这个视口号下可用）；</item>
+        /// <item><b>世界坐标小方框</b>：不依赖任何屏幕 API，按"视口高度 × 0.5%"折算等价的图纸单位尺度
+        /// （800 px 高的视口上约等于 PICKBOX 默认的 4 px）。中望走的就是这一条。</item>
+        /// </list>
+        /// <para>为什么必须降级而不是"失败就算了"：<c>BeginDoubleClick</c> 里根本拿不到预选集
+        /// （双击不产生预选），屏幕拾取框是唯一可靠入口。中望上它不可用，
+        /// 若不降级就会让双击编辑在整个中望宿主里完全失效。</para>
+        /// <para>返回值恒为 WCS 坐标：<c>BeginDoubleClickEventArgs.Location</c> 是 WCS，
+        /// <c>Editor.SelectCrossingPolygon</c> 也接收 WCS，因此不需要做 UCS 变换。</para>
+        /// <para>顺带算出框在图纸单位下的半边长，作为近邻兜底的容差 —— 二者必须是同一个尺度，
+        /// 否则会出现"选择集用像素框、兜底却用另一个尺度"的错配。</para></summary>
+        private static PickBox BuildPickBox(Editor ed, Point3d location)
+        {
+            // PICKBOX 是拾取框的"半个边长"（像素）；为 0 时拾取框退化成一个点，兜一个最小框，否则什么都选不到。
+            var half = (double)IntSysVar("PICKBOX", 4);
+            if (half <= 0) half = 4;
+
+            // 路径 1 / 2：屏幕坐标（返回类型是 System.Windows.Point，X/Y 为 double，**不是** System.Drawing.Point）。
+            foreach (var viewport in new[] { 1, 0 })
+            {
+                try
+                {
+                    var screen = ed.PointToScreen(location, viewport);
+                    var corners = new Point3dCollection();
+                    corners.Add(ed.PointToWorld(new System.Windows.Point(screen.X - half, screen.Y - half), viewport));
+                    corners.Add(ed.PointToWorld(new System.Windows.Point(screen.X + half, screen.Y - half), viewport));
+                    corners.Add(ed.PointToWorld(new System.Windows.Point(screen.X + half, screen.Y + half), viewport));
+                    corners.Add(ed.PointToWorld(new System.Windows.Point(screen.X - half, screen.Y + half), viewport));
+                    return new PickBox { Corners = corners, WorldHalf = WorldHalfOf(corners) };
+                }
+                catch (System.Exception ex)
+                {
+                    // 逐级降级属正常路径，只记 Warning 不记 Error：中望上这一条必然会失败。
+                    PluginLog.Warning("DoubleClick.HitTest",
+                        "PointToScreen(viewport=" + viewport + ") 不可用：" + ex.GetType().Name + " - " + ex.Message);
+                }
+            }
+
+            // 路径 3：世界坐标小方框。
+            var world = 0.0;
+            try
+            {
+                using (var view = ed.GetCurrentView())
+                {
+                    world = Math.Abs(view.Height) * 0.005;
+                }
+            }
+            catch (System.Exception ex)
+            {
+                PluginLog.Warning("DoubleClick.PickBox", "读取当前视图失败，改用固定尺度：" + ex.Message);
+            }
+            // 视口高度读不到（0 / 异常值）时兜一个不至于大得离谱的值，保证仍能选到点附近的实体。
+            if (!(world > 0) || double.IsInfinity(world)) world = 1.0;
+
+            var box = new Point3dCollection();
+            box.Add(new Point3d(location.X - world, location.Y - world, location.Z));
+            box.Add(new Point3d(location.X + world, location.Y - world, location.Z));
+            box.Add(new Point3d(location.X + world, location.Y + world, location.Z));
+            box.Add(new Point3d(location.X - world, location.Y + world, location.Z));
+            PluginLog.Info("DoubleClick.HitTest",
+                "已退回世界坐标拾取框（半边长 " + world.ToString("0.####") + "）。");
+            return new PickBox { Corners = box, WorldHalf = world };
+        }
+
+        /// <summary>由拾取框相邻两角反推世界坐标下的半边长；算不出来返回 1.0（图纸单位）。</summary>
+        private static double WorldHalfOf(Point3dCollection corners)
+        {
+            try
+            {
+                var value = corners[1].DistanceTo(corners[0]) * 0.5;
+                if (value > 0 && !double.IsInfinity(value)) return value;
+            }
+            catch (System.Exception ex) { PluginLog.Warning("DoubleClick.PickBox.Size", ex.Message); }
+            return 1.0;
         }
 
         /// <summary>实体是不是本插件的批注（走 XData / 编组链路识别）。</summary>

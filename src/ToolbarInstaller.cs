@@ -118,9 +118,17 @@ namespace XAnnotation
                 if (toolbar == null) { message = "工具栏创建失败：宿主未返回工具栏对象。"; return false; }
 
                 // 重复加载（或手动刷新）时先清掉旧按钮，再按当前代码重建，保证与版本一致。
+                // 必须判 null 再删：宿主侧取项失败时 InvokeMethod 会返回 null，
+                // 不判就会退化成"Count 一直 > 0、却又删不掉"的死循环。
                 while (Convert.ToInt32(toolbar.GetProperty("Count")) > 0)
                 {
-                    toolbar.InvokeMethod("Item", 0).InvokeMethod("Delete");
+                    var first = toolbar.InvokeMethod("Item", 0);
+                    if (first == null)
+                    {
+                        PluginLog.Warning("Toolbar.Ensure", "清空旧按钮时取不到按钮对象，已放弃继续清理。");
+                        break;
+                    }
+                    first.InvokeMethod("Delete");
                 }
 
                 for (var i = 0; i < Buttons.Length; i++) AddButton(toolbar, i, Buttons[i]);
@@ -165,18 +173,26 @@ namespace XAnnotation
         /// <summary>取当前宿主菜单组下的 Toolbars 集合 COM 对象；宿主不支持时返回 <c>null</c>。</summary>
         private static object GetToolbarsCollection()
         {
+#if GSCAD
+            // 浩辰：MenuGroups 走 COM 应用对象（托管静态 Application.MenuGroups 是半初始化的内部 COM 实例，
+            // 界面未就绪时调用会踩出 AccessViolationException —— 2026-10-13 实机日志里
+            // GetToolbarsCollection → InvokeDispMethod 那次访问冲突就是它）。
+            // 取项之前先用 Count 探一次就绪状态，没就绪就当作"暂时不可用"，交给 Idle 重试。
+            var comApp = MenuInstaller.GetComApplication();
+            var gscadGroups = comApp == null ? null : comApp.GetProperty("MenuGroups");
+            if (!MenuInstaller.IsMenuGroupsReady(gscadGroups)) return null;
+            // 菜单组按下标 0 取（第 0 项即主菜单组，其 CUI 里 <MenuGroup Name="GCAD">）。
+            return gscadGroups.InvokeMethod("Item", 0)?.GetProperty("Toolbars");
+#else
             var menuGroups = MenuInstaller.GetStatic(typeof(UiApplication), "MenuGroups");
             if (menuGroups == null) return null;
 #if ZWCAD
-            var group = menuGroups.InvokeMethod("Item", 0);
-#elif GSCAD
-            // 浩辰与中望同处理：菜单组按下标 0 取（按名取会抛 TargetInvocationException），
-            // 第 0 项即主菜单组（其 CUI 里 <MenuGroup Name="GCAD">）。
             var group = menuGroups.InvokeMethod("Item", 0);
 #else
             var group = menuGroups.InvokeMethod("Item", "Acad");
 #endif
             return group?.GetProperty("Toolbars");
+#endif
         }
 
         /// <summary>按名称找工具栏；不存在或宿主查询抛异常时返回 <c>null</c>（等价于"还没有"）。</summary>

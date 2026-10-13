@@ -41,6 +41,7 @@ namespace XAnnotation
         [CommandMethod("X_PZ_NOTE", CommandFlags.Modal)]
         public void CreateAnnotation()
         {
+            PluginLog.Info("X_PZ_NOTE", "打开批注功能选择框。");
             AnnotationPanel.ShowOrActivate();
         }
 
@@ -48,6 +49,7 @@ namespace XAnnotation
         [CommandMethod("X_PZ_RUN", CommandFlags.Modal)]
         public void RunAnnotationFromPanel()
         {
+            PluginLog.Info("X_PZ_RUN", "命令上下文已进入。");
             AnnotationPanel.RunQueuedAnnotation();
         }
 

@@ -121,8 +121,11 @@ namespace XAnnotation
 
                 object menuBar;
                 object menuGroups;
-#if ACAD_CORE
-                // AutoCAD 2025+ Core：MenuBar / MenuGroups 走 COM 反射
+#if ACAD_CORE || GSCAD
+                // AutoCAD 2025+ / 浩辰：MenuBar / MenuGroups 走 COM 应用对象。
+                // 浩辰特别注意：托管静态属性 Application.MenuGroups 返回的是内部 COM 后期绑定实例，
+                // 界面完全就绪前调用会踩出 AccessViolationException（进程级内存损坏，之后一切行为变随机），
+                // 必须改走官方 COM 接口 AcadApplication（与中望分支取工具栏用的是同一口径）。
                 var acadApplication = GetAcadApplication();
                 menuBar = acadApplication == null ? null : GetComProperty(acadApplication, "MenuBar");
                 menuGroups = acadApplication == null ? null : GetComProperty(acadApplication, "MenuGroups");
@@ -136,6 +139,16 @@ namespace XAnnotation
                     message = "当前 CAD 未公开菜单栏接口。";
                     return false;
                 }
+
+#if GSCAD
+                // 取项之前先确认菜单组集合真的可用：读 Count 是最轻的探针，读不到或为 0 即"还没就绪"。
+                // 少了这一步，界面未就绪时那次 Item 调用会直接踩出访问冲突。
+                if (!IsMenuGroupsReady(menuGroups))
+                {
+                    message = "宿主菜单组尚未就绪（将在 Idle 时重试）。";
+                    return false;
+                }
+#endif
 
                 var menuGroup = InvokeItem(menuGroups, PreferredMenuGroupName)
                     ?? InvokeItem(menuGroups, 0);
@@ -309,6 +322,30 @@ namespace XAnnotation
             return property?.GetValue(null, null);
         }
 
+        /// <summary>探针：宿主的菜单组集合是否已经可用。
+        /// <para>只读 <c>Count</c>（带 catch）：读不到或为 0 就认定"界面还没就绪"。
+        /// 之所以必须先探再取，是因为浩辰的 MenuGroups 是 COM 后期绑定对象，
+        /// 未就绪时任何 <c>Item(...)</c> 都会踩出 <c>AccessViolationException</c> ——
+        /// 而访问冲突一旦发生，进程内存已损坏，之后插件的每个宿主调用都可能莫名其妙地失败。</para></summary>
+        internal static bool IsMenuGroupsReady(object menuGroups)
+        {
+            if (menuGroups == null) return false;
+            try
+            {
+                var count = menuGroups.GetType().InvokeMember(
+                    "Count", BindingFlags.GetProperty, null, menuGroups, null);
+                var value = Convert.ToInt32(count);
+                if (value > 0) return true;
+                PluginLog.Warning("Menu.Peek", "菜单组数量为 " + value + "，判定宿主界面尚未就绪。");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("Menu.Peek", ex.Message);
+                return false;
+            }
+        }
+
 #if ACAD_CORE
         private static object GetAcadApplication()
         {
@@ -335,7 +372,29 @@ namespace XAnnotation
 
             return null;
         }
+#elif GSCAD
+        /// <summary>浩辰的 COM 应用对象。取 MenuBar / MenuGroups 一律走它，
+        /// <b>不读托管静态属性</b> <c>Application.MenuGroups</c> —— 那个返回的是内部 COM 后期绑定实例，
+        /// 在 CAD 界面就绪之前调用会踩出 <c>AccessViolationException</c>。
+        /// <para>浩辰的 COM 属性名是 <c>AcadApplication</c>（与 AutoCAD 同名，不是中望的 ZcadApplication）。</para></summary>
+        private static object GetAcadApplication()
+        {
+            try { return UiApplication.AcadApplication; }
+            catch (Exception ex) { PluginLog.Error("Menu.AcadApplication", ex); return null; }
+        }
 #endif
+
+        /// <summary>取宿主的 COM 应用对象（AcadApplication）；托管 API 没有等价物的宿主返回 null。
+        /// <para>取 MenuBar / MenuGroups 一律走它，而不要读托管静态属性：
+        /// 后者在界面就绪前可能返回半初始化的 COM 实例，调用即进程级访问冲突。</para></summary>
+        internal static object GetComApplication()
+        {
+#if ACAD_CORE || GSCAD
+            return GetAcadApplication();
+#else
+            return null;
+#endif
+        }
 
         private static object GetComProperty(object target, string name)
         {
@@ -379,14 +438,42 @@ namespace XAnnotation
 
     internal static class ReflectionTool
     {
+        /// <summary>读属性；目标为 null 或宿主侧调用失败时返回 null，绝不冒泡。
+        /// <para>COM 后期绑定调用在宿主侧出问题时抛什么类型完全不可预期
+        /// （<c>TargetInvocationException</c> / <c>ArgumentException</c> / <c>MissingMethodException</c>），
+        /// 调用方一律按"拿不到"处理，因此这里统一吞掉并记日志。</para></summary>
         public static object GetProperty(this object obj, string key)
         {
-            return obj.GetType().InvokeMember(key, BindingFlags.GetProperty, null, obj, null);
+            if (obj == null) return null;
+            try
+            {
+                return obj.GetType().InvokeMember(key, BindingFlags.GetProperty, null, obj, null);
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("Reflection.GetProperty." + key, ex.Message);
+                return null;
+            }
         }
 
+        /// <summary>调方法；目标为 null 或宿主侧调用失败时返回 null，绝不冒泡。
+        /// <para><b>为什么一定要吞</b>：浩辰的菜单/工具栏对象是 COM 后期绑定实例，
+        /// 在 CAD 界面完全就绪之前调用会踩出 <c>AccessViolationException</c>（访问冲突）。
+        /// 它一旦冒泡，进程内存已被破坏，后续所有宿主调用都会变得随机 ——
+        /// 2026-10-13 的实机日志里，同一份 DLL 连续三次加载，菜单一次"未取得默认菜单组"、
+        /// 两次"已创建但未能插入菜单栏"，就是这种不确定性的直接表现。</para></summary>
         public static object InvokeMethod(this object obj, string method, params object[] objArray)
         {
-            return obj.GetType().InvokeMember(method, BindingFlags.InvokeMethod, null, obj, objArray);
+            if (obj == null) return null;
+            try
+            {
+                return obj.GetType().InvokeMember(method, BindingFlags.InvokeMethod, null, obj, objArray);
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("Reflection.Invoke." + method, ex.Message);
+                return null;
+            }
         }
     }
 }

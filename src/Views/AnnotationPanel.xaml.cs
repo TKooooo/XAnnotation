@@ -165,12 +165,17 @@ namespace XAnnotation.Views
             RefreshControls();
             // 选项变更的防抖：只有在"这一轮已经在跑/已排队"时才需要做点什么（见 OnOptionStartTick）；
             // 面板待命期间改选项只是更新状态，启动交给 StartByTrigger。
-            _optionStartTimer = new DispatcherTimer(DispatcherPriority.Background)
+            _optionStartTimer = new DispatcherTimer(DispatcherPriority.Normal)
             {
                 Interval = OptionStartDebounce
             };
             _optionStartTimer.Tick += OnOptionStartTick;
-            _startDelayTimer = new DispatcherTimer(DispatcherPriority.Background)
+            // 优先级必须是 Normal，不能是 Background：
+            //   Background 的回调只在 Dispatcher 队列空闲时才跑，而 CAD 宿主的主循环长期有
+            //   Render / Input 级别的消息，Background 的 Tick 可能被无限期饿死 ——
+            //   症状就是"点了外形按钮，日志有触发记录、却再也等不到那 200ms 后的启动"。
+            //   Normal 与输入同优先级，几个宿主上都能稳定到点。
+            _startDelayTimer = new DispatcherTimer(DispatcherPriority.Normal)
             {
                 Interval = TimeSpan.FromMilliseconds(StartDelayMs)
             };
@@ -294,20 +299,41 @@ namespace XAnnotation.Views
         // 所以改成"待命"：面板保持可用，由下面几种"用户真的开始画了"的迹象触发启动。
 
         /// <summary>触发一次启动：延时一小会儿（见 <see cref="StartDelayMs"/>）再按当前外形与选项进入命令。
-        /// <para>已经在跑/已排队的那一轮不重复启动；本轮待命状态被消费掉。</para></summary>
+        /// <para>已经在跑/已排队的那一轮不重复启动；本轮待命状态被消费掉。</para>
+        /// <para><b>提前返回一律记日志</b>：这条路径上任何一次静默 return 都会表现为"点了按钮毫无反应"，
+        /// 而现场只看命令行是查不出来的（2026-10-13 浩辰上就遇到过）。</para></summary>
         private void StartByTrigger(string reason)
         {
-            if (_closing || !IsLoaded || _isRunning || _startPending) return;
+            if (_closing || !IsReadyToStart || _isRunning || _startPending)
+            {
+                PluginLog.Info("AnnotationPanel.Start",
+                    "忽略「" + reason + "」触发：closing=" + _closing
+                    + " IsLoaded=" + IsLoaded + " IsVisible=" + IsVisible
+                    + " running=" + _isRunning + " pending=" + _startPending + "。");
+                return;
+            }
             _dwellStartUtc = default(DateTime);
             PluginLog.Info("AnnotationPanel.Start", "由「" + reason + "」触发启动。");
             _startDelayTimer.Stop();
             _startDelayTimer.Start();
         }
 
+        /// <summary>窗口是否已经能承载一次启动。
+        /// <para>不直接用 <c>IsLoaded</c>：AutoCAD / 中望 / 浩辰三种宿主里 WPF 的生命周期触发时机并不一致，
+        /// 在个别宿主上 <c>IsLoaded</c> 迟迟不为 true，会让"点外形按钮"整条入口静默失效。
+        /// 只要窗口已经 Show 出来（<c>IsVisible</c>）就认为可用。</para></summary>
+        private bool IsReadyToStart => IsLoaded || IsVisible;
+
         private void OnStartDelayTick(object sender, EventArgs e)
         {
             _startDelayTimer.Stop();
-            if (_closing || !IsLoaded || _isRunning || _startPending) return;
+            if (_closing || !IsReadyToStart || _isRunning || _startPending)
+            {
+                PluginLog.Info("AnnotationPanel.StartDelay",
+                    "延时到点但放弃启动：closing=" + _closing + " IsLoaded=" + IsLoaded
+                    + " running=" + _isRunning + " pending=" + _startPending + "。");
+                return;
+            }
             StartWithShape(_currentShape);
         }
 
@@ -318,6 +344,8 @@ namespace XAnnotation.Views
             UnhookPointMonitor();
             if (_closing || _isRunning || _startPending) return;
             // 异步一小步再判断前景窗口：WM_ACTIVATE 到达时 GetForegroundWindow 可能还没切完。
+            // 优先级取 Normal（不能用 Background）：CAD 主循环长期占着高优先级消息，
+            // 排到 Background 的这一跳可能迟迟轮不到，表现同样是"点了图纸没反应"。
             Dispatcher.BeginInvoke(
                 new Action(() =>
                 {
@@ -325,13 +353,14 @@ namespace XAnnotation.Views
                     {
                         if (_closing || _isRunning || _startPending) return;
                         if (IsCadMainWindowForeground()) StartByTrigger("焦点回到图纸");
+                        else PluginLog.Info("AnnotationPanel.Deactivated", "失活但前景窗口不是 CAD 主窗口，不启动。");
                     }
                     catch (Exception ex)
                     {
                         PluginLog.Warning("AnnotationPanel.OnPanelDeactivated", ex.Message);
                     }
                 }),
-                DispatcherPriority.Background);
+                DispatcherPriority.Normal);
         }
 
         /// <summary>当前前景窗口是不是 <b>CAD 主窗口</b>。
@@ -745,7 +774,11 @@ namespace XAnnotation.Views
         {
             try
             {
-                if (_instance != null && _instance.IsLoaded) { _instance.Activate(); return; }
+                // 用 IsReadyToStart（IsLoaded || IsVisible）而不是裸 IsLoaded：
+                // 个别宿主上 IsLoaded 迟迟不为 true，只判它会让每次 X_PZ_NOTE 都新建一个面板实例，
+                // 旧实例的状态（排队、本轮快照）全丢，且界面上会叠出第二个框。
+                if (_instance != null && _instance.IsReadyToStart) { _instance.Activate(); return; }
+                PluginLog.Info("AnnotationPanel.ShowOrActivate", "新建批注功能选择框。");
                 _instance = new AnnotationPanel();
                 _instance.Show();
                 // 明确激活：面板要拿着焦点，用户"点图纸 → 开始画"这条路径（面板失活）才成立。
@@ -773,7 +806,12 @@ namespace XAnnotation.Views
         {
             try
             {
-                SelectShapeButton((sender as Button)?.Tag as string);
+                var shape = (sender as Button)?.Tag as string;
+                PluginLog.Info("AnnotationPanel.ShapeClick",
+                    "点击外形按钮「" + (shape ?? "(空)") + "」：running=" + _isRunning
+                    + " pending=" + _startPending + " closing=" + _closing
+                    + " IsLoaded=" + IsLoaded + " IsVisible=" + IsVisible + "。");
+                SelectShapeButton(shape);
 
                 // 清掉"选项变更"的防抖与流程变更标志，避免 500ms 后再来一次中止。
                 _flowChanged = false;
@@ -785,6 +823,7 @@ namespace XAnnotation.Views
                 {
                     // 正在跑：中止它。StartAnnotation 的 finally 会按 _restartPending 用 _currentShape
                     // （已是新外形）重开一轮，不需要这里再排队。
+                    PluginLog.Info("AnnotationPanel.ShapeClick", "本轮进行中，按新外形中止后重开。");
                     _restartPending = true;
                     InteractionAbort.Request();
                     return;
@@ -794,6 +833,8 @@ namespace XAnnotation.Views
             }
             catch (Exception ex)
             {
+                // 这里必须既写日志又写命令行：面板上的按钮点下去"没反应"时，
+                // 只有日志能证明事件到底有没有进来、异常发生在哪一步。
                 PluginLog.Error("AnnotationPanel.Shape_Click", ex);
                 var doc = CadApplication.DocumentManager.MdiActiveDocument;
                 doc?.Editor.WriteMessage("\n启动批注失败: " + ex.Message);
@@ -891,14 +932,19 @@ namespace XAnnotation.Views
             }
         }
 
-        /// <summary>由 CAD 内部命令调用，确保所有 Editor 选点都运行在正式命令上下文。</summary>
+        /// <summary>由 CAD 内部命令（X_PZ_RUN）调用，确保所有 Editor 选点都运行在正式命令上下文。
+        /// <para>每个"放弃执行"的分支都必须<b>先</b>调用 <see cref="ResetPendingStart"/> 再返回：
+        /// <c>_startPending</c> 一旦留在 true，面板上后续所有入口（外形按钮 / 回车 / 点图纸）
+        /// 都会被 <see cref="StartByTrigger"/> 静默挡掉 —— 现场表现就是"面板按钮点了完全没反应"。</para></summary>
         internal static void RunQueuedAnnotation()
         {
             var panel=_instance;
-            if(panel==null||!panel.IsLoaded||!panel._startPending)return;
+            if(panel==null){PluginLog.Warning("X_PZ_RUN","面板实例已不存在，忽略本次调用。");return;}
+            if(!panel._startPending){PluginLog.Warning("X_PZ_RUN","面板没有待执行的启动请求，忽略本次调用。");return;}
             var queuedDocument = panel._queuedDocument;
             if (queuedDocument == null || queuedDocument.IsDisposed)
             {
+                PluginLog.Warning("X_PZ_RUN","排队的图纸已关闭，放弃本次启动。");
                 panel.ResetPendingStart();
                 return;
             }
@@ -906,6 +952,8 @@ namespace XAnnotation.Views
             // 旧图纸队列中的延迟命令不能消费另一张图纸的新请求。
             if (CadApplication.DocumentManager.MdiActiveDocument != queuedDocument)
             {
+                PluginLog.Warning("X_PZ_RUN","当前图纸已不是排队时的那一篇，放弃本次启动。");
+                panel.ResetPendingStart();
                 return;
             }
 
@@ -916,9 +964,12 @@ namespace XAnnotation.Views
 
             if (settings == null)
             {
+                PluginLog.Warning("X_PZ_RUN","排队参数缺失（settings 为空），放弃本次启动。");
                 return;
             }
 
+            PluginLog.Info("X_PZ_RUN", "开始执行排队的批注：外形=" + (shape ?? "(默认)")
+                + " 单区域=" + isSingle + "。");
             panel.StartAnnotation(
                 queuedDocument,
                 settings,
@@ -1001,11 +1052,23 @@ namespace XAnnotation.Views
                     return;
                 }
 
-                if (_startPending &&
-                    _queuedDocument == doc &&
-                    (DateTime.UtcNow - _pendingSinceUtc).TotalSeconds < 2)
+                if (_startPending && _queuedDocument == doc)
                 {
-                    return;
+                    var age = (DateTime.UtcNow - _pendingSinceUtc).TotalSeconds;
+                    if (age < 2)
+                    {
+                        PluginLog.Info("AnnotationPanel.Queue",
+                            "2 秒内重复排队，忽略本次（已排队 " + age.ToString("0.##") + " 秒）。");
+                        return;
+                    }
+
+                    // 超过 2 秒还没被 X_PZ_RUN 消费，说明宿主根本没执行那条命令（SendStringToExecute 被丢弃）。
+                    // 此时必须复位再重排，否则 _startPending 会永久停在 true ——
+                    // 面板上之后每一次点击都会被 StartByTrigger 挡掉，用户看到的就是"怎么点都没反应"。
+                    PluginLog.Warning("AnnotationPanel.Queue",
+                        "上次排队的 X_PZ_RUN 已过 " + age.ToString("0.#") + " 秒仍未被执行，"
+                        + "判定宿主未消费该命令，复位后重新排队。");
+                    ResetPendingStart();
                 }
 
                 _queuedDocument = doc;
@@ -1015,6 +1078,8 @@ namespace XAnnotation.Views
                 _startPending = true;
                 _pendingSinceUtc = DateTime.UtcNow;
                 doc.SendStringToExecute("X_PZ_RUN ", true, false, false);
+                PluginLog.Info("AnnotationPanel.Queue",
+                    "已把 X_PZ_RUN 排入命令队列（外形=" + shape + " 单区域=" + isSingle + "）。");
             }
             catch (Exception ex)
             {
@@ -1036,9 +1101,12 @@ namespace XAnnotation.Views
         {
             if (_isRunning)
             {
+                PluginLog.Warning("AnnotationPanel.StartAnnotation", "已有绘制在进行中（_isRunning 未复位），忽略本次启动。");
                 return;
             }
 
+            PluginLog.Info("AnnotationPanel.StartAnnotation",
+                "进入绘制流程：外形=" + (shape ?? "(默认)") + " 单区域=" + isSingle + "。");
             _isRunning = true;
             _runSettings = settings;
             _runIsSingle = isSingle;
