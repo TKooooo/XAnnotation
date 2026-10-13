@@ -1065,6 +1065,27 @@ namespace XAnnotation.Views
             SettingsStore.Save(_s);
         }
 
+        /// <summary>插件卸载时调用：关掉面板并**确保摘掉 Esc 键盘钩子**。
+        /// <para><b>为什么必须做</b>：Esc 钩子的回调是托管委托。若宿主把插件程序集卸掉
+        /// （.NET 8 宿主用的 collectible AssemblyLoadContext）而钩子还挂在系统里，
+        /// 下一次按键就会跳进已卸载的代码 —— 那是进程级崩溃，且现场完全看不出跟插件有关。</para></summary>
+        internal static void ShutdownForUnload()
+        {
+            var panel = _instance;
+            if (panel == null) return;
+            try
+            {
+                if (panel.IsLoaded) panel.Close();
+                else panel.RemoveEscapeHook();
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("AnnotationPanel.ShutdownForUnload", ex.Message);
+                try { panel.RemoveEscapeHook(); } catch { }
+            }
+            _instance = null;
+        }
+
         /// <summary>显示或激活批注功能选择框（单例）。任何异常都记日志并提示，避免冒泡成 CAD 致命错误。</summary>
         public static void ShowOrActivate()
         {

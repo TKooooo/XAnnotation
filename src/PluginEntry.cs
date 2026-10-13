@@ -321,6 +321,10 @@ namespace XAnnotation
             DisarmDoubleClick();
             MenuInstaller.Detach();
             ToolbarInstaller.Detach();
+            // 关掉批注面板并摘掉它的 Esc 键盘钩子：钩子回调是托管委托，
+            // 程序集被卸载后还挂着钩子的话，下一次按键会走进已卸载的代码（进程级崩溃）。
+            try { XAnnotation.Views.AnnotationPanel.ShutdownForUnload(); }
+            catch (System.Exception ex) { PluginLog.Error("Terminate.AnnotationPanel", ex); }
             RestoreQuickPropertiesMode();
         }
 
