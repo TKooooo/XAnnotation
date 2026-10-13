@@ -65,6 +65,25 @@ namespace XAnnotation
         /// </summary>
         public static bool EnsureWithRetry()
         {
+#if GSCAD
+            // ★ 浩辰：菜单**不走宿主的 COM 菜单接口**，改用 <see cref="GstarCadMenu"/> 直接把
+            //   <MacroGroup>/<PopMenu>/<WSPop> 注入主 CUI 文件（gcad.cuix）。
+            //
+            //   原因（2026-10-13 实机日志）：浩辰的 Application.AcadApplication.MenuGroups 在 .NET 8
+            //   宿主下读 Count 必抛 TargetInvocationException <- AccessViolationException。
+            //   访问冲突是进程级内存损坏 —— 一旦踩到，之后插件的每个宿主调用都会变随机
+            //   （同一份 DLL 三次加载三种结果就是这么来的）。而同一时刻 MenuBar.Read Count 是好的（=16），
+            //   说明不是"界面没就绪"，是 MenuGroups 这条路本身在浩辰 + .NET 8 下不通。
+            //   所以这里**一次都不重试**，直接走文件注入（它纯文件 IO，零宿主依赖，也不会崩）。
+            if (GstarCadMenu.Ensure(out var cuiMessage))
+            {
+                PluginLog.Info("Menu", cuiMessage);
+                return true;
+            }
+
+            PluginLog.Warning("Menu", cuiMessage ?? "浩辰菜单注入失败。");
+            return false;
+#else
             if (Ensure(out var message))
             {
                 PluginLog.Info("Menu", message);
@@ -74,6 +93,7 @@ namespace XAnnotation
             PluginLog.Warning("Menu", message ?? "菜单首次安装失败，将在宿主界面就绪后重试。");
             AttachRetry();
             return false;
+#endif
         }
 
         /// <summary>卸载插件时摘掉 Idle 重试回调。</summary>
@@ -151,6 +171,12 @@ namespace XAnnotation
         }
         public static bool Ensure(out string message)
         {
+#if GSCAD
+            // 浩辰不会走到这里：EnsureWithRetry 已改走 GstarCadMenu 的 CUI 文件注入。
+            // 留这段短路是防止将来有人直接调 Ensure —— 那样又会去碰 MenuGroups，而它在 .NET 8 下必崩。
+            message = "浩辰使用 CUI 文件注入安装菜单（见 GstarCadMenu）。";
+            return false;
+#else
             try
             {
                 ShowMenuBar();
@@ -275,6 +301,7 @@ namespace XAnnotation
                 message = "菜单创建失败: " + ex.Message;
                 return false;
             }
+#endif
         }
 
         private static void ShowMenuBar()

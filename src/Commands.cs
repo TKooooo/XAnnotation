@@ -720,8 +720,15 @@ namespace XAnnotation
         public void ReloadMenu()
         {
             var doc = CadApplication.DocumentManager.MdiActiveDocument;
+#if GSCAD
+            // 浩辰的菜单装在主 CUI 文件（gcad.cuix）里，所以「重新加载菜单」＝重新注入一次。
+            // 注入本身是幂等的：已存在就只报一句，不会重复写文件。
+            GstarCadMenu.Ensure(out var cuiMessage);
+            doc?.Editor.WriteMessage("\n" + cuiMessage);
+#else
             MenuInstaller.Ensure(out var message);
             doc?.Editor.WriteMessage("\n" + message);
+#endif
         }
 
         /// <summary>打开「关于 X-批注」对话框。</summary>

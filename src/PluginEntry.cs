@@ -287,8 +287,19 @@ namespace XAnnotation
                     + "，失败步骤=" + (failedSteps.Count == 0 ? "无" : string.Join("/", failedSteps.ToArray())));
 
                 var message =
+#if GSCAD
+                    // 浩辰：菜单是直接写进主 CUI 文件（gcad.cuix）的，CUI 只在启动/重载时读取，
+                    // 所以必须明确告诉用户"重启才显示" —— 否则又会收到"菜单栏不显示 X-批注"的反馈。
+                    // 工具栏在浩辰上暂不创建（原因见 ToolbarInstaller.Ensure：会踩 MenuGroups 的访问冲突）。
+                    "\nX-批注已加载。" +
+                    (menuReady
+                        ? " X-批注菜单已写入浩辰主菜单，重启浩辰CAD后显示（或执行 MENU 命令重载）。"
+                        : " 菜单未安装，可直接用下面的命令名操作。") +
+                    " 浩辰版暂不创建工具栏。" +
+#else
                     "\nX-批注已加载。" + (menuReady ? " 菜单已就绪。" : " 菜单稍后自动挂上（或用 X_PZ_MENU）。") +
                     (toolbarReady ? " X-批注工具栏已就绪。" : " X-批注工具栏未就绪（将自动重试，或用 X_PZ_TOOLBAR）。") +
+#endif
                     " 命令: X_PZ_DRAW / X_PZ_NOTE / X_PZ_EDIT / X_PZ_MOVE /" +
                     " X_PZ_DELETE / X_PZ_HIDE / X_PZ_SHOW / X_PZ_MERGE / X_PZ_FILTER / X_PZ_REFRESH / X_PZ_CLOUD / X_PZ_LIST /" +
                     " X_PZ_SUMMARY / X_PZ_LEGEND / X_PZ_WORD / X_PZ_HISTORY / X_PZ_KB /" +

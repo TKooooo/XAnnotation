@@ -88,7 +88,11 @@ namespace XAnnotation
             }
 
             PluginLog.Warning("Toolbar", message);
+#if !GSCAD
+            // 浩辰不挂重试：这条路上每次尝试都会去碰 MenuGroups，而它在 .NET 8 下必抛
+            // AccessViolationException；重试 180 次 = 把进程状态反复踩坏 180 次。见 Ensure 的注释。
             AttachRetry();
+#endif
             return false;
         }
 
@@ -148,6 +152,17 @@ namespace XAnnotation
         /// <summary>创建（或复用）「X-批注」工具栏，按当前代码重建按钮并显示。</summary>
         public static bool Ensure(out string message)
         {
+#if GSCAD
+            // ★ 浩辰：暂时不建工具栏。
+            //   原因：工具栏只能从「菜单组的 Toolbars 集合」拿，而浩辰的
+            //   Application.AcadApplication.MenuGroups 在 .NET 8 宿主下读 Count 必抛
+            //   AccessViolationException（进程级内存损坏 —— 一旦踩到，插件之后所有宿主调用都会变随机）。
+            //   2026-10-13 的实机日志里，这条路上重试了 40 次、40 次全崩。
+            //   菜单改走 GstarCadMenu 的 CUI 文件注入后已经可用，命令也都能从菜单/命令行直接跑，
+            //   所以这里**一次都不尝试**，宁可少一个工具栏，也不让进程状态被访问冲突毁掉。
+            message = "浩辰暂不创建工具栏（菜单已可用；命令名 X_PZ_* 也可直接使用）。";
+            return false;
+#else
             try
             {
                 var toolbars = GetToolbarsCollection();
@@ -191,6 +206,7 @@ namespace XAnnotation
                 message = "工具栏创建失败: " + ex.Message;
                 return false;
             }
+#endif
         }
 
         /// <summary>切换工具栏显示/隐藏；工具栏还不存在时直接创建并显示。</summary>
@@ -220,15 +236,10 @@ namespace XAnnotation
         private static object GetToolbarsCollection()
         {
 #if GSCAD
-            // 浩辰：MenuGroups 走 COM 应用对象（托管静态 Application.MenuGroups 是半初始化的内部 COM 实例，
-            // 界面未就绪时调用会踩出 AccessViolationException —— 2026-10-13 实机日志里
-            // GetToolbarsCollection → InvokeDispMethod 那次访问冲突就是它）。
-            // 取项之前先用 Count 探一次就绪状态，没就绪就当作"暂时不可用"，交给 Idle 重试。
-            var comApp = MenuInstaller.GetComApplication();
-            var gscadGroups = comApp == null ? null : comApp.GetProperty("MenuGroups");
-            if (!MenuInstaller.IsMenuGroupsReady(gscadGroups)) return null;
-            // 菜单组按下标 0 取（第 0 项即主菜单组，其 CUI 里 <MenuGroup Name="GCAD">）。
-            return gscadGroups.InvokeMethod("Item", 0)?.GetProperty("Toolbars");
+            // 浩辰：**不碰 MenuGroups**。它在这个宿主 + .NET 8 下读 Count 必抛 AccessViolationException
+            // （2026-10-13 实机日志里 Toolbars 那条路就是这么崩的）。工具栏因此暂时不可用，
+            // 菜单与命令行命令 X_PZ_* 不受影响。
+            return null;
 #else
             var menuGroups = MenuInstaller.GetStatic(typeof(UiApplication), "MenuGroups");
             if (menuGroups == null) return null;

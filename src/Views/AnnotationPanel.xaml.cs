@@ -70,8 +70,10 @@ namespace XAnnotation.Views
         private const int DrawingVisitGapMs = 700;
 
         /// <summary>触发启动后等一小会儿再进命令（毫秒）：让触发它的那次点击先处理完，
-        /// 免得那一下被新一轮的取点提示当成第一个角点。</summary>
-        private const int StartDelayMs = 200;
+        /// 免得那一下被新一轮的取点提示当成第一个角点。
+        /// <para>2026-10-13 第三轮反馈后由 200 收到 120：这条延时是"用户感知启动快慢"的主要一环，
+        /// 而 120 ms 仍足够让触发它的那一下点击处理完（AutoCAD 一次点击处理 &lt; 50 ms）。</para></summary>
+        private const int StartDelayMs = 120;
 
         /// <summary>「基点」外形下"字号自适应"的参照尺寸＝当前视图高度 × 本系数。
         /// <para>基点批注没有云线范围可作参照，取一个"用户在此视图下常框选的范围大小"当参照，
@@ -141,22 +143,24 @@ namespace XAnnotation.Views
         /// <summary>空闲轮询计时器（仅面板待命时有效）。优先级必须 Normal：Background 会被 CAD 主循环饿死。</summary>
         private readonly DispatcherTimer _idleWatch;
 
-        /// <summary>轮询间隔（毫秒）。</summary>
-        private const int IdleWatchIntervalMs = 200;
+        /// <summary>轮询间隔（毫秒）。
+        /// <para>2026-10-13 第三轮反馈后由 200 收到 120：这段等待直接叠加在用户的"我已经把鼠标
+        /// 移到图纸上了，怎么还不开始"里，是启动延迟里最容易被感知的一环。</para></summary>
+        private const int IdleWatchIntervalMs = 120;
 
-        /// <summary>光标连续满足"就在图纸上"这么多次（× <see cref="IdleWatchIntervalMs"/>）才算用户要开始画。</summary>
-        private const int IdleWatchDwellTicks = 3;
+        /// <summary>光标连续满足"不在面板上、且落在 CAD 窗口里"这么多次（× <see cref="IdleWatchIntervalMs"/>）
+        /// 才算用户要开始画。
+        /// <para>2026-10-13 由 3 收到 2：原值（600 ms）让"打开面板 → 移鼠标到图纸"这条最自然的路径
+        /// 慢到用户以为没反应 —— 实测用户会在这段空档里回去点一次外形按钮（反馈里的
+        /// "都需要手动选择一次矩形批注才能批注"）。2 × 120 = 240 ms 足够滤掉面板刚 Show 出来时的抖动。</para></summary>
+        private const int IdleWatchDwellTicks = 2;
 
-        /// <summary>光标最后一次采样的位置；null ＝ 还没采过样。</summary>
-        private POINT? _cursorSample;
-
-        /// <summary>面板这次被激活之后光标是否移动过（见 <see cref="CursorMovedPixels"/>）。
-        /// <para>用来把"用户真的把鼠标挪去图纸了"和"宿主自己把焦点抢回去"分开：
-        /// 后者发生在用户根本没碰鼠标的时候（面板一露脸就被抢焦点），光标一像素都没动。</para></summary>
-        private bool _cursorMoved;
-
-        /// <summary>光标位移超过这个像素数就认为"动过"（毫秒级抖动不算）。</summary>
-        private const int CursorMovedPixels = 3;
+        // 2026-10-13 第三轮反馈后**取消**了"光标必须动过（位移 ≥ 3 px）"这道判定。
+        // 它当初是为了把"宿主把焦点抢回去（用户没碰鼠标）"和"用户真去图纸"分开，但代价是把
+        // 最自然的那条路径也卡住了一拍：光标位置采样要等下一拍才有上一拍可比，白送一个轮询周期。
+        // 而现在这种误判已经被两道更直接的判据挡住了：
+        //   ① IsCursorOverPanel()：光标还在面板矩形里就一律不算"离开面板"；
+        //   ② IdleWatchDwellTicks 连续 2 拍确认（240 ms），面板刚 Show 出来的抖动过不去。
 
         /// <summary>"光标在图纸上"已经连续满足了几次轮询。</summary>
         private int _idleDwellTicks;
@@ -195,8 +199,19 @@ namespace XAnnotation.Views
         /// <summary>连勾多项时合并成一次重开的等待时间。</summary>
         private static readonly TimeSpan OptionStartDebounce = TimeSpan.FromMilliseconds(500);
 
-        /// <summary>排队的 X_PZ_RUN 超过这个时间仍未被宿主消费，就判定"命令被丢了"，改走兜底入口。</summary>
-        private const int RunWatchdogMs = 600;
+        /// <summary>排队的 X_PZ_RUN 超过这个时间仍未被宿主消费，就判定"命令被丢了"，改走兜底入口。
+        /// <para>2026-10-13 由 600 收到 400：<c>SendStringToExecute</c> 在部分宿主上被静默丢弃时，
+        /// 这 400 ms 就是"面板没反应"的时长；配合 <see cref="MaxRunRetry"/> 次重试，
+        /// 最坏情况下 1.2 s 内必定落到 <c>Editor.Command</c> 或最后一次重发。</para></summary>
+        private const int RunWatchdogMs = 400;
+
+        /// <summary>看门狗最多重发几次 X_PZ_RUN（第一次重发前还会先试一次 <c>Editor.Command</c>）。
+        /// <para>只重发、不重复执行：<c>X_PZ_RUN</c> 一进命令上下文就会 <see cref="ResetPendingStart"/>，
+        /// 所以 <c>_startPending</c> 一旦被清就说明那一条已被消费，看门狗不会再动手。</para></summary>
+        private const int MaxRunRetry = 4;
+
+        /// <summary>本轮启动已经重发过几次（每次排队归零）。</summary>
+        private int _runRetry;
 
         /// <summary>排队的 X_PZ_RUN 超过这个时间仍未被消费，视为状态已失效：下次触发时先复位再排队。
         /// <para>没有它，一旦宿主没执行那条命令，<c>_startPending</c> 会永久停在 true，
@@ -261,10 +276,8 @@ namespace XAnnotation.Views
                 // 不用先关掉另一个才能操作这一个（两个窗口各自独立：各拖各的、各关各的）。
                 WpfWindowUtil.BringToTop(this);
 
-                // 回到面板＝这一段时间的"光标动过"不算数：要重新从面板离开、再动鼠标才算用户去图纸。
-                _cursorMoved = false;
+                // 回到面板＝这一段时间的"光标在图纸上"计数作废：要重新从面板离开才算用户去图纸。
                 _idleDwellTicks = 0;
-                _cursorSample = null;
 
                 // 「批注设置」窗口开着时不算"离开面板去画图"：用户是在配置，不是在画。
                 // 设置窗口压着的正好是图纸，这时候还留着光标触发的话，鼠标划过它就可能莫名开始一轮。
@@ -449,17 +462,19 @@ namespace XAnnotation.Views
             _idleDwellTicks = 0;
         }
 
-        /// <summary>空闲轮询：面板待命时，只要"光标确实动过、现在落在图纸上、CAD 是前台窗口"
+        /// <summary>空闲轮询：面板待命时，只要"光标已不在面板上、落在 CAD 窗口里、CAD 是前台窗口"
         /// 连续满足几次，就按当前外形与选项开始一轮。
-        /// <para>与宿主事件无关，四个宿主（AutoCAD 2013-2024 / 2025+ / 中望 / 浩辰）行为一致。
-        /// 刻意要求"光标动过"：宿主把焦点抢回去时用户根本没碰鼠标（面板一露脸就被抢），
-        /// 只有用户自己挪鼠标才说明他是要去图纸上画。</para></summary>
+        /// <para>与宿主事件无关，四个宿主（AutoCAD 2013-2024 / 2025+ / 中望 / 浩辰）行为一致。</para>
+        /// <para><b>2026-10-13 第三轮反馈后的改动</b>：这里原本还要求"光标动过（位移 ≥ 3 px）"，
+        /// 现在去掉了。去掉之后"打开面板 → 把鼠标移向图纸"就<b>直接开始</b>，
+        /// 用户不需要在面板上点任何按钮 —— 这正是反馈里要的
+        /// "进入之后不需要做任何选择就能矩形批注"。误判风险由两道判据兜着：
+        /// 光标仍在面板矩形内一律不算离开（宿主抢焦点时鼠标通常还压在面板上），
+        /// 以及连续 <see cref="IdleWatchDwellTicks"/> 拍确认（240 ms）。</para></summary>
         private void OnIdleWatchTick(object sender, EventArgs e)
         {
             try
             {
-                SampleCursorMovement();
-
                 if (_closing || !IsReadyToStart || _isRunning || _startPending)
                 {
                     _idleDwellTicks = 0;
@@ -469,7 +484,12 @@ namespace XAnnotation.Views
                 // 「批注设置」窗口开着时不算"去图纸画"（用户是在配置）。
                 if (SettingsWindow.IsOpen) { _idleDwellTicks = 0; return; }
 
-                if (!_cursorMoved) { _idleDwellTicks = 0; return; }
+                // 本轮已经被结束过一轮（用户按 Esc 取消 / 正常画完）而面板还开着：_panelLeaveUtc
+                // 被清成 MinValue，含义是"用户还没重新表示要画"。这时按住轮询，直到他回到面板
+                // （Activated / MouseLeave 会重新盖章）——否则取消一轮之后光标还停在图纸上，
+                // 下一拍就会自己又开一轮，用户按 Esc 等于没按。
+                if (_panelLeaveUtc == DateTime.MinValue) { _idleDwellTicks = 0; return; }
+
                 if (IsCursorOverPanel()) { _idleDwellTicks = 0; return; }
                 if (!IsCursorOverCadWindow()) { _idleDwellTicks = 0; return; }
                 if (!IsCadMainWindowForeground()) { _idleDwellTicks = 0; return; }
@@ -484,19 +504,6 @@ namespace XAnnotation.Views
             }
         }
 
-        /// <summary>采一次光标位置，判断用户是否动过鼠标（位移 ≥ <see cref="CursorMovedPixels"/> 像素）。</summary>
-        private void SampleCursorMovement()
-        {
-            POINT point;
-            if (!GetCursorPos(out point)) return;
-            var previous = _cursorSample;
-            _cursorSample = point;
-            if (previous == null) return;
-
-            var dx = Math.Abs(point.X - previous.Value.X);
-            var dy = Math.Abs(point.Y - previous.Value.Y);
-            if (dx + dy >= CursorMovedPixels) _cursorMoved = true;
-        }
 
         /// <summary>鼠标指针此刻是否落在 CAD 主窗口的矩形范围内（拿不到句柄时不拦，退回只判前景窗口）。</summary>
         private static bool IsCursorOverCadWindow()
@@ -931,11 +938,8 @@ namespace XAnnotation.Views
         /// <para>所以"打开后先勾多对一 / 仅绘云线"是完全有效的：勾好后回到图纸即按新选项开始。</para></summary>
         private void OnPanelLoaded(object sender, RoutedEventArgs e)
         {
-            // 开局清空"光标动过"的判定：面板刚露面时宿主可能立刻把焦点抢走，
-            // 那时候用户根本没碰鼠标，不能被当成"要去图纸上画"（见 OnIdleWatchTick）。
-            _cursorMoved = false;
+            // 面板刚露面：把"光标在图纸上"的连续计数清零，重新数（见 OnIdleWatchTick）。
             _idleDwellTicks = 0;
-            _cursorSample = null;
             try
             {
                 Left = SystemParameters.WorkArea.Left + 20;
@@ -1325,12 +1329,7 @@ namespace XAnnotation.Views
         {
             _runWatchdog.Stop();
             if (_closing || !_startPending || _isRunning) return;   // 已被 X_PZ_RUN 消费 = 正常路径成功
-
-            var age = _pendingSinceUtc == default(DateTime)
-                ? RunWatchdogMs / 1000.0
-                : (DateTime.UtcNow - _pendingSinceUtc).TotalSeconds;
-            PluginLog.Warning("AnnotationPanel.RunWatchdog",
-                "排队的 X_PZ_RUN 在 " + age.ToString("0.#") + " 秒内未被宿主执行，改走兜底入口。");
+            _runRetry++;
 
             var doc = _queuedDocument;
             if (doc == null || doc.IsDisposed || CadApplication.DocumentManager.MdiActiveDocument != doc)
@@ -1342,16 +1341,36 @@ namespace XAnnotation.Views
 
             try
             {
-                if (TryRunByEditorCommand(doc))
+                if (_runRetry > MaxRunRetry)
+                {
+                    PluginLog.Warning("AnnotationPanel.RunWatchdog",
+                        "已重发 " + MaxRunRetry + " 次宿主仍未消费 X_PZ_RUN，放弃本次启动"
+                        + "（可直接用命令名 X_PZ_NOTE / X_PZ_DRAW）。");
+                    ResetPendingStart();
+                    return;
+                }
+
+                var age = _pendingSinceUtc == default(DateTime)
+                    ? RunWatchdogMs / 1000.0
+                    : (DateTime.UtcNow - _pendingSinceUtc).TotalSeconds;
+                PluginLog.Warning("AnnotationPanel.RunWatchdog",
+                    "排队的 X_PZ_RUN 在 " + age.ToString("0.#") + " 秒内未被宿主执行，"
+                    + "第 " + _runRetry + "/" + MaxRunRetry + " 次兜底。");
+
+                // 第一次兜底优先走 Editor.Command：它是 acedCommand 的托管版，在当前线程**同步**进入
+                // 命令上下文，不经过宿主的命令行输入缓冲，是这条链上最可靠的一环。
+                // 拿不到这个 API（AutoCAD 2013/2014）或它自身失败时，再退回重发。
+                if (_runRetry == 1 && TryRunByEditorCommand(doc))
                 {
                     // Editor.Command 是同步的：返回时这一轮要么已经跑完、要么已经抛异常，
                     // 无论如何 _startPending 的使命都结束了。
                     return;
                 }
-                PluginLog.Warning("AnnotationPanel.RunWatchdog",
-                    "宿主未公开 Editor.Command，改用换行结尾重新发送 X_PZ_RUN。");
+
                 doc.SendStringToExecute("X_PZ_RUN\n", true, false, false);
                 _pendingSinceUtc = DateTime.UtcNow;
+                // 继续盯：宿主如果还是不消费，下一拍再发一次（最多 MaxRunRetry 次）。
+                _runWatchdog.Start();
             }
             catch (Exception ex)
             {
@@ -1363,7 +1382,9 @@ namespace XAnnotation.Views
         /// <summary>用 <c>Editor.Command(object[])</c> 兜底执行 X_PZ_RUN；宿主没有这个 API 时返回 false。
         /// <para>走反射而不是直接调用：net4 目标是拿 AutoCAD 2013/2014 的托管程序集编的，
         /// 而那两个版本的 <c>Editor</c> 没有 <c>Command</c>（AutoCAD 2015+ 才有），
-        /// 直接写就编不过；反射让同一份源码在四个宿主上都成立。</para></summary>
+        /// 直接写就编不过；反射让同一份源码在四个宿主上都成立。</para>
+        /// <para>失败时把 <b>InnerException</b> 一并写出来：COM / 宿主侧抛出的真实原因
+        /// （例如 <c>eNotInCommand</c>）只在里层，外面永远只有一句"调用的目标发生了异常"。</para></summary>
         private static bool TryRunByEditorCommand(Document doc)
         {
             try
@@ -1383,7 +1404,10 @@ namespace XAnnotation.Views
             catch (Exception ex)
             {
                 PluginLog.Warning("AnnotationPanel.RunWatchdog(Editor.Command)",
-                    ex.GetType().Name + " - " + ex.Message);
+                    ex.GetType().Name + " - " + ex.Message
+                    + (ex.InnerException != null
+                        ? " <- " + ex.InnerException.GetType().Name + " - " + ex.InnerException.Message
+                        : string.Empty));
                 return false;
             }
         }
@@ -1459,7 +1483,14 @@ namespace XAnnotation.Views
                 _queuedShape = shape;
                 _startPending = true;
                 _pendingSinceUtc = DateTime.UtcNow;
-                try { doc.SendStringToExecute("X_PZ_RUN ", true, false, false); }
+                _runRetry = 0;
+                // ★ 以换行结尾，不用尾随空格。
+                //   2026-10-13 的实机日志把这条钉死了：排队的写法是 "X_PZ_RUN "（尾随空格），
+                //   看门狗 0.6 s 后判定"未被宿主执行"；兜底改成 "X_PZ_RUN\n" 的那一次，
+                //   同一秒就出现了 [X_PZ_RUN] 命令上下文已进入。空格与换行虽然都能提交命令名，
+                //   但 SendStringToExecute 在 CAD 正忙（面板刚 Show / 焦点切换）时，
+                //   结尾不是回车的那一条更容易被丢掉。
+                try { doc.SendStringToExecute("X_PZ_RUN\n", true, false, false); }
                 catch (Exception sendEx) { PluginLog.Error("AnnotationPanel.Queue(send)", sendEx); }
                 PluginLog.Info("AnnotationPanel.Queue",
                     "已把 X_PZ_RUN 排入命令队列（外形=" + shape + " 单区域=" + isSingle + "）。");
@@ -1591,11 +1622,11 @@ namespace XAnnotation.Views
                     // 否则用户一边看着图纸一边按 Esc 取消时，光标还停在图纸上，会被立刻判定成"又要开始"。
                     // 想再开始：回面板点一下（或点外形按钮 / 按回车）。
                     _panelLeaveUtc = DateTime.MinValue;
-                    // 同理：本轮作废之后要重新动一下鼠标才算"用户要去画"，
-                    // 否则光标一直停在图纸上、下一轮一待命就会自己又开一轮。
-                    _cursorMoved = false;
+                    // 同理：本轮作废之后不允许空闲轮询再自己开一轮。
+                    // 轮询的放行条件是 _panelLeaveUtc 有效（见 OnIdleWatchTick），
+                    // 上面这一句把它清成 MinValue 就等于把轮询按住 —— 直到用户重新回到面板
+                    // （Activated / MouseLeave 会重新盖章），这样"按 Esc 取消"不会被立刻重开覆盖。
                     _idleDwellTicks = 0;
-                    _cursorSample = null;
                 }
             }
         }
