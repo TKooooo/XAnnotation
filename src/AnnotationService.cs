@@ -461,6 +461,62 @@ namespace XAnnotation
             settings.LineWidth=Math.Max(0,settings.LineWidth*scale);
         }
 
+        /// <summary>把编组里<b>既有实体</b>上量到的尺寸回填成"图面实测值"，并同步修正本次要用的设置。
+        /// <para><b>只在 <c>data.RenderTextHeight &lt;= 0</c> 时动手</b>（老批注，或创建时漏记实测值的新批注）。
+        /// 兜底的必要性：<see cref="SettingsForExisting"/> 在没有实测值时只能退回设置文件，
+        /// 而设置文件里存的是 <b>打印 mm</b>（如字高 3）＋ 出图比例分母（如 100）——两者不是一个量级。
+        /// <see cref="FormatText"/> 会把 <c>s.TextHeight</c> 写成内联字高码 <c>\H3;</c>，
+        /// 于是"双击编辑一次"就把正文从图面 300 压成 3 —— 2026-10-13 用户实测：面板「基点」模式画的批注，
+        /// 双击修改并补了文字之后"文字变得很小"（根因就是这条：<c>DoBasePointAnnotation</c> 当时漏传了
+        /// <c>captureRenderSettings</c>）。</para>
+        /// <para>推算口径与创建时的 <see cref="ResolveEffectiveSettings"/> 完全一致：正文取实测字高，
+        /// 首行/次行/固定宽度/对勾高度按"实测 ÷ 打印字高"的同一倍数放大。
+        /// 回填进 <paramref name="data"/> 后由 <c>Update</c> 的 <c>WriteMaster</c> 一起落盘，这条批注被永久修好
+        /// ——不必要求用户重画，老图打开编辑一次即自愈。</para></summary>
+        private static void AdoptMeasuredTextHeights(Transaction tr, Group group, AnnotationData data, AnnotationSettings settings)
+        {
+            if (data == null || settings == null || group == null) return;
+            if (data.RenderTextHeight > 0) return;   // 已记过实测值：以它为准，别动
+
+            // 实测字高优先取文字实体；文字实体缺失（数据损坏／被手工删）时不猜，保持原样。
+            double measured = 0;
+            try
+            {
+                foreach (ObjectId oid in group.GetAllEntityIds())
+                {
+                    if (!oid.IsValid || oid.IsErased) continue;
+                    if (tr.GetObject(oid, OpenMode.ForRead, false) is MText text && text.TextHeight > 1e-9)
+                    {
+                        measured = text.TextHeight;
+                        break;
+                    }
+                }
+            }
+            catch (System.Exception ex) { PluginLog.Warning("Update.AdoptMeasuredTextHeights", ex.Message); }
+
+            if (!(measured > 1e-9)) return;
+
+            var raw = Math.Max(settings.TextHeight, 0.1);   // 设置文件里的"打印字高(mm)"
+            var factor = measured / raw;                    // 与创建时 text/rawText 同一口径
+            settings.TextHeight = measured;
+            settings.HeaderHeight = Math.Max(0.1, settings.HeaderHeight * factor);
+            settings.SecondLineHeight = Math.Max(0.1, settings.SecondLineHeight * factor);
+            settings.CloudRadius = Math.Max(0.001, settings.CloudRadius * factor);
+            settings.LineWidth = Math.Max(0, settings.LineWidth * factor);
+            settings.FixedWidthValue = Math.Max(measured * 6.0, settings.FixedWidthValue * factor);
+            settings.CheckHeight = Math.Max(settings.CheckHeight * factor, measured * 2.0);
+
+            // 回填进批注数据：下次编辑／批注列表／CSV 导出／并入表格就都有正确的图面值了。
+            data.RenderTextHeight = settings.TextHeight;
+            data.RenderHeaderHeight = settings.HeaderHeight;
+            data.RenderSecondLineHeight = settings.SecondLineHeight;
+            data.RenderCloudRadius = settings.CloudRadius;
+            data.RenderLineWidth = settings.LineWidth;
+            PluginLog.Info("Update.AdoptMeasuredTextHeights",
+                "批注 " + data.Number + " 缺少图面实测字高，已按编组内文字反测：" + measured.ToString("0.###")
+                + "（打印字高 " + raw.ToString("0.###") + " × " + factor.ToString("0.###") + " 倍）。");
+        }
+
         /// <summary>原批注的实测样式：从编组内既有云线/引线/文字框实体上读回来，供"增补云线"照原样补画。
         /// 每一项测不出时留空（颜色用 null、尺寸用 -1），由调用方退回设置值。</summary>
         private sealed class ExistingStyle
@@ -1023,6 +1079,9 @@ namespace XAnnotation
                 if (!Contains(group, entityId)) return false;
                 TryReadMaster(group, tr, out var oldData); // 修改前留底，用于生成变更明细
                 var existingSettings=SettingsForExisting(data);
+                // 老数据（或旧版「基点」流程画的批注）没记"图面实测字高"，先从编组里的文字实体反测回来，
+                // 否则下面的 FormatText 会按设置文件里的"打印 mm"写出内联字高码，编辑一次正文就被压小。
+                AdoptMeasuredTextHeights(tr, group, data, existingSettings);
                 EnsureLayer(doc.Database,tr,existingSettings,data);
                 var targetLayer=EffectiveLayer(existingSettings,data);
                 MText changedText=null;Polyline box=null;var leaders=new List<Polyline>();

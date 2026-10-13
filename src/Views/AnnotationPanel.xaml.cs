@@ -124,6 +124,10 @@ namespace XAnnotation.Views
         private Document _monitorDocument;
         /// <summary>启动前的一小段延时（见 <see cref="StartDelayMs"/>）。</summary>
         private readonly DispatcherTimer _startDelayTimer;
+        /// <summary>排队的 X_PZ_RUN 的看门狗：宿主没消费那条命令时换一条入口再试（见 <see cref="OnRunWatchdogTick"/>）。</summary>
+        private readonly DispatcherTimer _runWatchdog;
+        /// <summary>面板 Show 出来的时刻，用于 <see cref="AutoStartGraceMs"/> 宽限期判定。</summary>
+        private DateTime _shownUtc;
 
         /// <summary>本轮所处阶段。面板打开时是"待命"（<see cref="Idle"/>，没有命令在跑，控件都可点）；
         /// 用户回图纸/回车/点外形后才会进入下面三个阶段。
@@ -145,6 +149,21 @@ namespace XAnnotation.Views
 
         /// <summary>连勾多项时合并成一次重开的等待时间。</summary>
         private static readonly TimeSpan OptionStartDebounce = TimeSpan.FromMilliseconds(500);
+
+        /// <summary>排队的 X_PZ_RUN 超过这个时间仍未被宿主消费，就判定"命令被丢了"，改走兜底入口。</summary>
+        private const int RunWatchdogMs = 600;
+
+        /// <summary>排队的 X_PZ_RUN 超过这个时间仍未被消费，视为状态已失效：下次触发时先复位再排队。
+        /// <para>没有它，一旦宿主没执行那条命令，<c>_startPending</c> 会永久停在 true，
+        /// 之后面板上每一次点击都会被"忽略…pending=True"挡掉 —— 2026-10-13 浩辰实测就是这个症状。</para></summary>
+        private static readonly TimeSpan StalePending = TimeSpan.FromSeconds(2);
+
+        /// <summary>面板刚 Show 出来的这一小段内，"焦点回图纸"不作为启动依据。
+        /// <para>个别宿主（浩辰 GstarCAD 2026）里 WPF 面板 Show 出来就会被 CAD 主窗口夺回焦点，
+        /// 于是 <c>Deactivated</c> 立刻触发、被误判成"用户点了图纸"——用户什么都没点就自己排了一轮，
+        /// 而且这一轮还卡住了后面所有按钮。宽限期只影响"刚打开的一瞬"，
+        /// 用户随后挪光标到图纸/点外形按钮/回车都不受影响。</para></summary>
+        private const int AutoStartGraceMs = 800;
         private readonly List<Point3d> _multiCloudFirsts = new List<Point3d>();
         private readonly List<Point3d> _multiCloudSeconds = new List<Point3d>();
 
@@ -180,6 +199,13 @@ namespace XAnnotation.Views
                 Interval = TimeSpan.FromMilliseconds(StartDelayMs)
             };
             _startDelayTimer.Tick += OnStartDelayTick;
+            // X_PZ_RUN 的看门狗：SendStringToExecute 在个别宿主上会被静默丢弃（见 OnRunWatchdogTick）。
+            // 同样必须是 Normal 优先级 —— 用 Background 会被 CAD 主循环饿死，看门狗就永远不出来救场。
+            _runWatchdog = new DispatcherTimer(DispatcherPriority.Normal)
+            {
+                Interval = TimeSpan.FromMilliseconds(RunWatchdogMs)
+            };
+            _runWatchdog.Tick += OnRunWatchdogTick;
             // 面板修改只保留为待应用值；真正落盘发生在开始绘制时。
             Loaded += OnPanelLoaded;
             // 用户从别处回到面板（或刚打开）：视作"刚从面板离开"，这样他接着把光标移到图纸就算开始画。
@@ -211,6 +237,7 @@ namespace XAnnotation.Views
                 _continuePending = false;
                 _optionStartTimer.Stop();
                 _startDelayTimer.Stop();
+                _runWatchdog.Stop();
                 UnhookPointMonitor();
                 // 退订设置窗口的"已保存"通知：面板关掉后不该再被它回调。
                 // 注意 **不去关** 设置窗口：两个窗口各自独立关闭，关面板不影响它。
@@ -304,6 +331,9 @@ namespace XAnnotation.Views
         /// 而现场只看命令行是查不出来的（2026-10-13 浩辰上就遇到过）。</para></summary>
         private void StartByTrigger(string reason)
         {
+            // 先自愈再判重。顺序不能反：复位逻辑若放在下面那道 _startPending 早退之后，就永远走不到 ——
+            // 于是"宿主丢了一次 X_PZ_RUN"会变成"之后怎么点都被忽略"，正是 2026-10-13 浩辰实测的现场。
+            ClearStalePending();
             if (_closing || !IsReadyToStart || _isRunning || _startPending)
             {
                 PluginLog.Info("AnnotationPanel.Start",
@@ -316,6 +346,21 @@ namespace XAnnotation.Views
             PluginLog.Info("AnnotationPanel.Start", "由「" + reason + "」触发启动。");
             _startDelayTimer.Stop();
             _startDelayTimer.Start();
+        }
+
+        /// <summary>排队的 X_PZ_RUN 迟迟没被宿主消费时复位，避免 <c>_startPending</c> 把面板永久锁死。
+        /// <para>判定口径见 <see cref="StalePending"/>；复位只清"已排队"状态，不影响正在跑的那一轮。</para></summary>
+        private void ClearStalePending()
+        {
+            if (!_startPending || _isRunning) return;
+            if (_pendingSinceUtc == default(DateTime)) { ResetPendingStart(); return; }
+            var age = DateTime.UtcNow - _pendingSinceUtc;
+            if (age < StalePending) return;
+            PluginLog.Warning("AnnotationPanel.StalePending",
+                "排队的 X_PZ_RUN 已过 " + age.TotalSeconds.ToString("0.#") + " 秒仍未被执行，"
+                + "判定宿主未消费该命令，复位后重试。");
+            _runWatchdog.Stop();
+            ResetPendingStart();
         }
 
         /// <summary>窗口是否已经能承载一次启动。
@@ -343,6 +388,32 @@ namespace XAnnotation.Views
         {
             UnhookPointMonitor();
             if (_closing || _isRunning || _startPending) return;
+
+            // 刚打开的这一瞬不作为启动依据：个别宿主（浩辰）里面板 Show 出来就被 CAD 主窗口夺回焦点，
+            // Deactivated 立刻到达，用户什么都没点就自己排了一轮 —— 既违背"打开只待命"的模型，
+            // 也把 _startPending 挂住，进而让之后所有外形按钮都被忽略。
+            if (_shownUtc != default(DateTime))
+            {
+                var sinceShow = (DateTime.UtcNow - _shownUtc).TotalMilliseconds;
+                if (sinceShow < AutoStartGraceMs)
+                {
+                    PluginLog.Info("AnnotationPanel.Deactivated",
+                        "面板刚打开 " + sinceShow.ToString("0") + " ms，判定为宿主夺回焦点而非用户点图纸，不启动。");
+                    return;
+                }
+            }
+
+            // 光看"谁是前景窗口"不够：CAD 自己在命令收尾时就会把焦点抢回去，那一刻的面板失活
+            // 与"用户点了图纸"长得一模一样。二者只有一处确定性的差别 —— <b>光标在哪儿</b>：
+            // 用户要点图纸，鼠标必然已经离开面板；宿主抢焦点时鼠标通常还停在面板上。
+            // 所以这里只认光标位置，不比时间阈值（浩辰是打开约 1 秒后才被抢焦点，时间阈值根本卡不住）。
+            if (IsCursorOverPanel())
+            {
+                PluginLog.Info("AnnotationPanel.Deactivated",
+                    "失活时鼠标仍在面板范围内，判定为宿主抢回焦点而非用户点图纸，不启动。");
+                return;
+            }
+
             // 异步一小步再判断前景窗口：WM_ACTIVATE 到达时 GetForegroundWindow 可能还没切完。
             // 优先级取 Normal（不能用 Background）：CAD 主循环长期占着高优先级消息，
             // 排到 Background 的这一跳可能迟迟轮不到，表现同样是"点了图纸没反应"。
@@ -420,6 +491,41 @@ namespace XAnnotation.Views
 
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetCursorPos(out POINT point);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int X; public int Y; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+        /// <summary>鼠标指针此刻是否还落在本面板窗口的矩形范围内。
+        /// <para>用来区分"面板失活"的两种成因：用户点了图纸（光标已离开面板 → 该启动）与
+        /// 宿主自己抢回焦点（光标仍在面板上 → 不该启动）。用 Win32 取坐标而不是 WPF 的
+        /// <c>IsMouseOver</c>：窗口失活后 WPF 的鼠标状态会停止更新，拿到的可能是残留值。</para></summary>
+        private bool IsCursorOverPanel()
+        {
+            try
+            {
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                if (hwnd == IntPtr.Zero) return false;
+                if (!GetCursorPos(out var point)) return false;
+                if (!GetWindowRect(hwnd, out var rect)) return false;
+                return point.X >= rect.Left && point.X < rect.Right
+                    && point.Y >= rect.Top && point.Y < rect.Bottom;
+            }
+            catch (Exception ex)
+            {
+                // 取不到就按"不在面板上"处理（照旧走原来的判定），不因为一个探测失败堵死启动入口。
+                PluginLog.Warning("AnnotationPanel.IsCursorOverPanel", ex.Message);
+                return false;
+            }
+        }
 
 #if ZWCAD
         // ZWCAD 宿主不挂"光标进图纸"的监听：宁可少一个入口，也不引入未经验证的宿主 API。
@@ -652,6 +758,8 @@ namespace XAnnotation.Views
         /// <para>所以"打开后先勾多对一 / 仅绘云线"是完全有效的：勾好后回到图纸即按新选项开始。</para></summary>
         private void OnPanelLoaded(object sender, RoutedEventArgs e)
         {
+            // 记下"面板是什么时候露面的"：紧接着的这一小段里，"焦点回图纸"不算用户意图（见 AutoStartGraceMs）。
+            _shownUtc = DateTime.UtcNow;
             try
             {
                 Left = SystemParameters.WorkArea.Left + 20;
@@ -995,6 +1103,82 @@ namespace XAnnotation.Views
             _pendingSinceUtc = default(DateTime);
         }
 
+        /// <summary>看门狗：排队的 X_PZ_RUN 若没被宿主执行，换一条入口再试一次。
+        /// <para><b>为什么需要</b>：<c>Document.SendStringToExecute</c> 在浩辰 GstarCAD 2026 上会被静默丢弃 ——
+        /// 2026-10-13 的实机日志里，中望与 AutoCAD 排完队都会在同一秒出现
+        /// <c>[X_PZ_RUN] 命令上下文已进入。</c>，而浩辰那几次<b>一条都没有</b>；
+        /// 于是面板停"已排队"状态，之后点矩形/PL线/基点全被"忽略…pending=True"挡掉
+        /// （用户反馈的"浩辰控制面板里的矩形、PL线、基点都画不出来"）。</para>
+        /// <para>兜底入口 <c>Editor.Command(object[])</c> 是 acedCommand 的托管版，在当前线程同步进入命令上下文：
+        /// 浩辰、中望、AutoCAD 2015+ 都有（AutoCAD 2013/2014 没有，所以只能反射调用，
+        /// 这也避免把 net4 目标绑死在 2024 才有的 API 上）。没有它时退回以 <c>\n</c> 结尾再发一次 —— 部分宿主只认换行作回车。</para></summary>
+        private void OnRunWatchdogTick(object sender, EventArgs e)
+        {
+            _runWatchdog.Stop();
+            if (_closing || !_startPending || _isRunning) return;   // 已被 X_PZ_RUN 消费 = 正常路径成功
+
+            var age = _pendingSinceUtc == default(DateTime)
+                ? RunWatchdogMs / 1000.0
+                : (DateTime.UtcNow - _pendingSinceUtc).TotalSeconds;
+            PluginLog.Warning("AnnotationPanel.RunWatchdog",
+                "排队的 X_PZ_RUN 在 " + age.ToString("0.#") + " 秒内未被宿主执行，改走兜底入口。");
+
+            var doc = _queuedDocument;
+            if (doc == null || doc.IsDisposed || CadApplication.DocumentManager.MdiActiveDocument != doc)
+            {
+                PluginLog.Warning("AnnotationPanel.RunWatchdog", "排队的图纸已不可用，放弃本次启动。");
+                ResetPendingStart();
+                return;
+            }
+
+            try
+            {
+                if (TryRunByEditorCommand(doc))
+                {
+                    // Editor.Command 是同步的：返回时这一轮要么已经跑完、要么已经抛异常，
+                    // 无论如何 _startPending 的使命都结束了。
+                    return;
+                }
+                PluginLog.Warning("AnnotationPanel.RunWatchdog",
+                    "宿主未公开 Editor.Command，改用换行结尾重新发送 X_PZ_RUN。");
+                doc.SendStringToExecute("X_PZ_RUN\n", true, false, false);
+                _pendingSinceUtc = DateTime.UtcNow;
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Error("AnnotationPanel.RunWatchdog", ex);
+                ResetPendingStart();
+            }
+        }
+
+        /// <summary>用 <c>Editor.Command(object[])</c> 兜底执行 X_PZ_RUN；宿主没有这个 API 时返回 false。
+        /// <para>走反射而不是直接调用：net4 目标是拿 AutoCAD 2013/2014 的托管程序集编的，
+        /// 而那两个版本的 <c>Editor</c> 没有 <c>Command</c>（AutoCAD 2015+ 才有），
+        /// 直接写就编不过；反射让同一份源码在四个宿主上都成立。</para></summary>
+        private static bool TryRunByEditorCommand(Document doc)
+        {
+            try
+            {
+                var editor = doc.Editor;
+                var method = editor.GetType()
+                    .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+                    .FirstOrDefault(m => string.Equals(m.Name, "Command", StringComparison.Ordinal)
+                        && m.GetParameters().Length == 1
+                        && m.GetParameters()[0].ParameterType == typeof(object[]));
+                if (method == null) return false;
+
+                PluginLog.Info("AnnotationPanel.RunWatchdog", "用 Editor.Command 兜底执行 X_PZ_RUN。");
+                method.Invoke(editor, new object[] { new object[] { "X_PZ_RUN" } });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("AnnotationPanel.RunWatchdog(Editor.Command)",
+                    ex.GetType().Name + " - " + ex.Message);
+                return false;
+            }
+        }
+
         /// <summary>排队一次批注：从面板读取外形与勾选项，写入设置后由 X_PZ_RUN 在命令上下文执行。</summary>
         private void QueueAnnotationCommand(string shape)
         {
@@ -1052,23 +1236,12 @@ namespace XAnnotation.Views
                     return;
                 }
 
+                // 自愈要在这里做一次：本方法也可能由"焦点回图纸"之外的路径直接调用（连续绘制重排队等）。
+                ClearStalePending();
                 if (_startPending && _queuedDocument == doc)
                 {
-                    var age = (DateTime.UtcNow - _pendingSinceUtc).TotalSeconds;
-                    if (age < 2)
-                    {
-                        PluginLog.Info("AnnotationPanel.Queue",
-                            "2 秒内重复排队，忽略本次（已排队 " + age.ToString("0.##") + " 秒）。");
-                        return;
-                    }
-
-                    // 超过 2 秒还没被 X_PZ_RUN 消费，说明宿主根本没执行那条命令（SendStringToExecute 被丢弃）。
-                    // 此时必须复位再重排，否则 _startPending 会永久停在 true ——
-                    // 面板上之后每一次点击都会被 StartByTrigger 挡掉，用户看到的就是"怎么点都没反应"。
-                    PluginLog.Warning("AnnotationPanel.Queue",
-                        "上次排队的 X_PZ_RUN 已过 " + age.ToString("0.#") + " 秒仍未被执行，"
-                        + "判定宿主未消费该命令，复位后重新排队。");
-                    ResetPendingStart();
+                    PluginLog.Info("AnnotationPanel.Queue", "已有同一张图纸的排队请求未执行，忽略本次重复排队。");
+                    return;
                 }
 
                 _queuedDocument = doc;
@@ -1077,9 +1250,13 @@ namespace XAnnotation.Views
                 _queuedShape = shape;
                 _startPending = true;
                 _pendingSinceUtc = DateTime.UtcNow;
-                doc.SendStringToExecute("X_PZ_RUN ", true, false, false);
+                try { doc.SendStringToExecute("X_PZ_RUN ", true, false, false); }
+                catch (Exception sendEx) { PluginLog.Error("AnnotationPanel.Queue(send)", sendEx); }
                 PluginLog.Info("AnnotationPanel.Queue",
                     "已把 X_PZ_RUN 排入命令队列（外形=" + shape + " 单区域=" + isSingle + "）。");
+                // 布好看门狗：宿主没执行这条命令就换一条入口再试（见 OnRunWatchdogTick）。
+                _runWatchdog.Stop();
+                _runWatchdog.Start();
             }
             catch (Exception ex)
             {
@@ -1317,7 +1494,13 @@ namespace XAnnotation.Views
                 PluginLog.Warning("AnnotationPanel.DoBasePointAnnotation(view)", viewEx.Message);
             }
 
-            var effective = AnnotationService.ResolveEffectiveSettings(doc, settings, data, refSize);
+            // captureRenderSettings 必须是 true：把"图面实测值"（字高/首行字高/次行字高/云线半径/线宽）
+            // 记进批注数据。漏了它，data.RenderTextHeight 会一直是 0，之后**任何一次编辑**
+            // （双击 → X_PZ_EDIT → Update）都会走 SettingsForExisting 的兜底分支去读设置文件里的
+            // **打印 mm**（如 3），FormatText 随即写出内联字高码 \H3;，正文立刻被压成原尺寸的
+            // 1/出图比例分母（1:100 就是小 100 倍）——这正是"基点批注双击改完文字变得很小"的根因。
+            // 矩形/PL 两条流程一直传 true（见 DoPlineCloud / 多对一），只有这里漏了。
+            var effective = AnnotationService.ResolveEffectiveSettings(doc, settings, data, refSize, true);
 
             // 需求：点完基点要**先看见基点落在哪儿**，再弹内容窗口。
             // 这里先画一个临时标识（真实实体，画完即擦），用户在填内容时就能确认位置对不对；
