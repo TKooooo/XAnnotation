@@ -1,5 +1,7 @@
 using System;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
 #if ZWCAD
 using UiApplication = ZwSoft.ZwCAD.ApplicationServices.Application;
 using CadApplication = ZwSoft.ZwCAD.ApplicationServices.Core.Application;
@@ -41,10 +43,25 @@ namespace XAnnotation
 
 
         private static bool _retryAttached;
+        private static int _retryCount;
+        private static DateTime _lastRetryUtc = DateTime.MinValue;
+
+        /// <summary>两次重试之间至少间隔多久（毫秒）。Idle 在 CAD 空闲时触发得非常频繁，
+        /// 不节流的话会不停去碰宿主的 COM 菜单接口。</summary>
+        private const int RetryIntervalMs = 1000;
+
+        /// <summary>最多重试多少次（每次受 <see cref="RetryIntervalMs"/> 节流）。</summary>
+        private const int MaxRetryCount = 180;
 
         /// <summary>
-        /// 加载时创建/刷新菜单；若宿主界面尚未就绪则挂一次 Idle 重试。
+        /// 加载时创建/刷新菜单；若宿主界面尚未就绪则挂 Idle 回调<b>持续</b>重试。
         /// NETLOAD / 启动自动加载时都会走这里，无需再手动执行 X_PZ_MENU。
+        /// <para><b>为什么必须持续重试</b>：浩辰 GstarCAD 2026 随 CAD 启动自动加载时，
+        /// 插件 Initialize 跑在 CAD 界面完全就绪之前 —— 那一刻读
+        /// <c>Application.AcadApplication.MenuGroups.Count</c> 会抛
+        /// <c>TargetInvocationException</c>（2026-10-13 实机日志 [Menu.Peek]）。
+        /// 早先的实现只挂"一次"Idle 重试，而那个 Idle 紧接着 Initialize 就触发了、
+        /// 界面依然没就绪，于是<b>一次失败之后再无任何尝试</b> → 浩辰菜单栏永远不出现 X-批注。</para>
         /// </summary>
         public static bool EnsureWithRetry()
         {
@@ -54,14 +71,24 @@ namespace XAnnotation
                 return true;
             }
 
-            PluginLog.Warning("Menu", message ?? "菜单首次安装失败，将在 Idle 时重试。");
-            if (_retryAttached)
-            {
-                return false;
-            }
+            PluginLog.Warning("Menu", message ?? "菜单首次安装失败，将在宿主界面就绪后重试。");
+            AttachRetry();
+            return false;
+        }
 
+        /// <summary>卸载插件时摘掉 Idle 重试回调。</summary>
+        public static void Detach()
+        {
+            DetachRetry();
+        }
+
+        /// <summary>挂上（幂等的）Idle 重试回调。</summary>
+        private static void AttachRetry()
+        {
+            if (_retryAttached) return;
             try
             {
+                _lastRetryUtc = DateTime.MinValue;
                 CadApplication.Idle += OnRetryIdle;
                 _retryAttached = true;
             }
@@ -70,18 +97,11 @@ namespace XAnnotation
                 _retryAttached = false;
                 PluginLog.Error("Menu.Retry", ex);
             }
-
-            return false;
         }
 
-        /// <summary>卸载插件时摘掉 Idle 重试回调。</summary>
-        public static void Detach()
+        private static void DetachRetry()
         {
-            if (!_retryAttached)
-            {
-                return;
-            }
-
+            if (!_retryAttached) return;
             _retryAttached = false;
             try
             {
@@ -95,10 +115,22 @@ namespace XAnnotation
 
         private static void OnRetryIdle(object sender, EventArgs e)
         {
-            Detach();
+            var now = DateTime.UtcNow;
+            if ((now - _lastRetryUtc).TotalMilliseconds < RetryIntervalMs) return;
+            _lastRetryUtc = now;
+
+            if (++_retryCount > MaxRetryCount)
+            {
+                DetachRetry();
+                PluginLog.Warning("Menu.Retry",
+                    "已重试 " + MaxRetryCount + " 次仍未取得菜单组，停止自动安装；需要时手动执行 X_PZ_MENU。");
+                return;
+            }
+
             if (Ensure(out var message))
             {
-                PluginLog.Info("Menu.Retry", message);
+                DetachRetry();
+                PluginLog.Info("Menu.Retry", message + "（第 " + _retryCount + " 次重试成功）");
                 try
                 {
                     var doc = CadApplication.DocumentManager.MdiActiveDocument;
@@ -107,10 +139,14 @@ namespace XAnnotation
                 catch
                 {
                 }
+
+                return;
             }
-            else
+
+            // 每次都写日志会把文件刷爆（Idle 一秒一次）：只记第 1 次和每 20 次一条。
+            if (_retryCount == 1 || _retryCount % 20 == 0)
             {
-                PluginLog.Warning("Menu.Retry", message ?? "菜单 Idle 重试仍失败。");
+                PluginLog.Warning("Menu.Retry", "第 " + _retryCount + " 次重试仍失败: " + (message ?? "(无消息)"));
             }
         }
         public static bool Ensure(out string message)
@@ -145,7 +181,7 @@ namespace XAnnotation
                 // 少了这一步，界面未就绪时那次 Item 调用会直接踩出访问冲突。
                 if (!IsMenuGroupsReady(menuGroups))
                 {
-                    message = "宿主菜单组尚未就绪（将在 Idle 时重试）。";
+                    message = "宿主菜单组尚未就绪（将在 Idle 时重试）。" + ProbeSummary(menuBar, menuGroups);
                     return false;
                 }
 #endif
@@ -341,8 +377,42 @@ namespace XAnnotation
             }
             catch (Exception ex)
             {
-                PluginLog.Warning("Menu.Peek", ex.Message);
+                // 内层异常一定要写出来：COM 后期绑定失败时外层永远只有一句
+                // "调用的目标发生了异常"，真正的 HRESULT 与原因全在 InnerException 里。
+                PluginLog.Warning("Menu.Peek", Describe(ex));
                 return false;
+            }
+        }
+
+        /// <summary>把异常连同内层链一起摊平成一行（COM 后期绑定的失败信息只在 InnerException 里）。
+        /// <para>HRESULT 用 <see cref="Marshal.GetHRForException"/> 取：net40 的 <c>Exception.HResult</c>
+        /// 还是 protected（4.5 才公开），直接读会编译不过。</para></summary>
+        internal static string Describe(Exception ex)
+        {
+            if (ex == null) return "(null)";
+            var sb = new StringBuilder();
+            sb.Append(ex.GetType().Name).Append(": ").Append(ex.Message)
+              .Append(" (0x").Append(HResultOf(ex)).Append(')');
+            var inner = ex.InnerException;
+            var depth = 0;
+            while (inner != null && depth++ < 4)
+            {
+                sb.Append(" <- ").Append(inner.GetType().Name).Append(": ").Append(inner.Message)
+                  .Append(" (0x").Append(HResultOf(inner)).Append(')');
+                inner = inner.InnerException;
+            }
+            return sb.ToString();
+        }
+
+        private static string HResultOf(Exception ex)
+        {
+            try
+            {
+                return Marshal.GetHRForException(ex).ToString("X8");
+            }
+            catch
+            {
+                return "????????";
             }
         }
 
@@ -381,6 +451,37 @@ namespace XAnnotation
         {
             try { return UiApplication.AcadApplication; }
             catch (Exception ex) { PluginLog.Error("Menu.AcadApplication", ex); return null; }
+        }
+#endif
+
+#if GSCAD
+        /// <summary>诊断用：把 MenuBar / MenuGroups 两层探针结果拼成一句话，便于下次从日志一眼看出卡在哪一层。
+        /// <para>浩辰的 COM 菜单对象在界面就绪前调用会抛异常；如果重试之后依旧失败，
+        /// 这条信息就是判断"只是没就绪"还是"API 形状不对"的唯一依据。</para></summary>
+        private static string ProbeSummary(object menuBar, object menuGroups)
+        {
+            var sb = new StringBuilder(" [探测 MenuBar:");
+            sb.Append(menuBar == null ? "null" : menuBar.GetType().Name);
+            sb.Append(" Count=").Append(TryCount(menuBar));
+            sb.Append(" | MenuGroups:");
+            sb.Append(menuGroups == null ? "null" : menuGroups.GetType().Name);
+            sb.Append(" Count=").Append(TryCount(menuGroups));
+            sb.Append(']');
+            return sb.ToString();
+        }
+
+        private static string TryCount(object target)
+        {
+            if (target == null) return "n/a";
+            try
+            {
+                var count = target.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, target, null);
+                return Convert.ToString(count) ?? "(null)";
+            }
+            catch (Exception ex)
+            {
+                return Describe(ex);
+            }
         }
 #endif
 

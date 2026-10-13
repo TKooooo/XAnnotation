@@ -67,24 +67,50 @@ namespace XAnnotation
         };
 
         private static bool _retryAttached;
+        private static int _retryCount;
+        private static DateTime _lastRetryUtc = DateTime.MinValue;
 
-        /// <summary>创建或刷新工具栏并显示。失败时安排一次 Idle 重试（NETLOAD 时机过早、CAD 界面尚未就绪时很有用）。</summary>
+        /// <summary>两次重试之间的最小间隔（毫秒）：Idle 在 CAD 空闲时触发极其频繁，必须节流。</summary>
+        private const int RetryIntervalMs = 1000;
+
+        /// <summary>最多重试多少次。</summary>
+        private const int MaxRetryCount = 180;
+
+        /// <summary>创建或刷新工具栏并显示。失败时挂 Idle 回调<b>持续</b>重试
+        /// （NETLOAD / 随 CAD 启动自动加载时，宿主界面尚未就绪是常态 —— 只重试一次必然失败）。</summary>
         /// <returns>工具栏已就绪返回 <c>true</c>。</returns>
         public static bool EnsureWithRetry()
         {
-            if (Ensure(out _)) return true;
-            if (_retryAttached) return false;
-            try
+            if (Ensure(out var message))
             {
-                CadApplication.Idle += OnRetryIdle;
-                _retryAttached = true;
+                PluginLog.Info("Toolbar", message);
+                return true;
             }
-            catch (Exception ex) { _retryAttached = false; PluginLog.Error("Toolbar.Retry", ex); }
+
+            PluginLog.Warning("Toolbar", message);
+            AttachRetry();
             return false;
         }
 
         /// <summary>卸载插件时摘掉 Idle 重试回调（工具栏本身保留在 CAD 界面，不随卸载消失）。</summary>
         public static void Detach()
+        {
+            DetachRetry();
+        }
+
+        private static void AttachRetry()
+        {
+            if (_retryAttached) return;
+            try
+            {
+                _lastRetryUtc = DateTime.MinValue;
+                CadApplication.Idle += OnRetryIdle;
+                _retryAttached = true;
+            }
+            catch (Exception ex) { _retryAttached = false; PluginLog.Error("Toolbar.Retry", ex); }
+        }
+
+        private static void DetachRetry()
         {
             if (!_retryAttached) return;
             _retryAttached = false;
@@ -94,9 +120,29 @@ namespace XAnnotation
 
         private static void OnRetryIdle(object sender, EventArgs e)
         {
-            Detach();
-            var ready = Ensure(out var message);
-            if (!ready) PluginLog.Warning("Toolbar.Retry", message);
+            var now = DateTime.UtcNow;
+            if ((now - _lastRetryUtc).TotalMilliseconds < RetryIntervalMs) return;
+            _lastRetryUtc = now;
+
+            if (++_retryCount > MaxRetryCount)
+            {
+                DetachRetry();
+                PluginLog.Warning("Toolbar.Retry",
+                    "已重试 " + MaxRetryCount + " 次仍未建出工具栏，停止自动安装；需要时手动执行 X_PZ_TOOLBAR。");
+                return;
+            }
+
+            if (Ensure(out var message))
+            {
+                DetachRetry();
+                PluginLog.Info("Toolbar.Retry", message + "（第 " + _retryCount + " 次重试成功）");
+                return;
+            }
+
+            if (_retryCount == 1 || _retryCount % 20 == 0)
+            {
+                PluginLog.Warning("Toolbar.Retry", "第 " + _retryCount + " 次重试仍失败: " + message);
+            }
         }
 
         /// <summary>创建（或复用）「X-批注」工具栏，按当前代码重建按钮并显示。</summary>

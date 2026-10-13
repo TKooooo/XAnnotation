@@ -98,6 +98,7 @@ namespace XAnnotation.Views
         private bool _autoStarted;
         /// <summary>当前生效的外形（蓝底那个）。改绘制选项、自动开始时都用它，不必再点外形按钮。</summary>
         private string _currentShape = DefaultShape;
+
         /// <summary>绘制选项被改过、等当前这一轮退出来后按新选项重新开始。</summary>
         private bool _restartPending;
         /// <summary>本次改动里是否含「多对一批注」：它决定的是"单区域"还是"连续多范围"整套流程，
@@ -126,8 +127,52 @@ namespace XAnnotation.Views
         private readonly DispatcherTimer _startDelayTimer;
         /// <summary>排队的 X_PZ_RUN 的看门狗：宿主没消费那条命令时换一条入口再试（见 <see cref="OnRunWatchdogTick"/>）。</summary>
         private readonly DispatcherTimer _runWatchdog;
-        /// <summary>面板 Show 出来的时刻，用于 <see cref="AutoStartGraceMs"/> 宽限期判定。</summary>
-        private DateTime _shownUtc;
+
+        // ═══ 「光标回到图纸即开始」的轮询触发（见 OnIdleWatchTick） ═══
+        //
+        // 面板打开后必须能"什么都不点就直接去图纸上画"。早先只有两条入口：
+        //   ① AutoCAD 宿主的 Editor.PointMonitor（中望/浩辰是留空实现，等于没有）；
+        //   ② 面板 Deactivated 后的"焦点是否回到 CAD 主窗口"判定。
+        // 而 ② 只在**面板失去焦点的那一刻**到达一次 —— 中望实测面板刚打开 513 ms 就被宿主抢回焦点
+        // （浩辰约 1 s），那次失活被宽限期挡掉之后，用户再点图纸就什么事件都没有了，
+        // "回图纸即开始"这条路彻底死掉，只能去点外形按钮（用户反馈"必须要手动选一次外形才能批注"）。
+        // 轮询不看宿主事件，四个宿主行为一致。
+
+        /// <summary>空闲轮询计时器（仅面板待命时有效）。优先级必须 Normal：Background 会被 CAD 主循环饿死。</summary>
+        private readonly DispatcherTimer _idleWatch;
+
+        /// <summary>轮询间隔（毫秒）。</summary>
+        private const int IdleWatchIntervalMs = 200;
+
+        /// <summary>光标连续满足"就在图纸上"这么多次（× <see cref="IdleWatchIntervalMs"/>）才算用户要开始画。</summary>
+        private const int IdleWatchDwellTicks = 3;
+
+        /// <summary>光标最后一次采样的位置；null ＝ 还没采过样。</summary>
+        private POINT? _cursorSample;
+
+        /// <summary>面板这次被激活之后光标是否移动过（见 <see cref="CursorMovedPixels"/>）。
+        /// <para>用来把"用户真的把鼠标挪去图纸了"和"宿主自己把焦点抢回去"分开：
+        /// 后者发生在用户根本没碰鼠标的时候（面板一露脸就被抢焦点），光标一像素都没动。</para></summary>
+        private bool _cursorMoved;
+
+        /// <summary>光标位移超过这个像素数就认为"动过"（毫秒级抖动不算）。</summary>
+        private const int CursorMovedPixels = 3;
+
+        /// <summary>"光标在图纸上"已经连续满足了几次轮询。</summary>
+        private int _idleDwellTicks;
+
+        // ═══ Esc 退出批注（见 OnEscapeKey） ═══
+
+        /// <summary>线程级键盘钩子句柄；<see cref="IntPtr.Zero"/> 表示没装上。</summary>
+        private IntPtr _escapeHook;
+
+        /// <summary>钩子回调的强引用。<b>必须存字段</b>：委托被 GC 掉以后 CAD 的键盘路径会直接崩。</summary>
+        private LowLevelKeyboardProc _escapeHookProc;
+
+        /// <summary>这一轮是不是"用户自己取消的"（CAD 提示取消 / 内容窗取消），而不是插件的重启逻辑（改选项/换外形）。
+        /// <para>本轮结束时据此<b>退出批注</b>（关掉面板），对应需求"批注完成后或不需要批注时按 Esc 要能退出批注"。
+        /// 插件自己的重启走 <see cref="InteractionAbort"/>，不会被误判成用户取消。</para></summary>
+        private bool _userCancelled;
 
         /// <summary>本轮所处阶段。面板打开时是"待命"（<see cref="Idle"/>，没有命令在跑，控件都可点）；
         /// 用户回图纸/回车/点外形后才会进入下面三个阶段。
@@ -158,12 +203,6 @@ namespace XAnnotation.Views
         /// 之后面板上每一次点击都会被"忽略…pending=True"挡掉 —— 2026-10-13 浩辰实测就是这个症状。</para></summary>
         private static readonly TimeSpan StalePending = TimeSpan.FromSeconds(2);
 
-        /// <summary>面板刚 Show 出来的这一小段内，"焦点回图纸"不作为启动依据。
-        /// <para>个别宿主（浩辰 GstarCAD 2026）里 WPF 面板 Show 出来就会被 CAD 主窗口夺回焦点，
-        /// 于是 <c>Deactivated</c> 立刻触发、被误判成"用户点了图纸"——用户什么都没点就自己排了一轮，
-        /// 而且这一轮还卡住了后面所有按钮。宽限期只影响"刚打开的一瞬"，
-        /// 用户随后挪光标到图纸/点外形按钮/回车都不受影响。</para></summary>
-        private const int AutoStartGraceMs = 800;
         private readonly List<Point3d> _multiCloudFirsts = new List<Point3d>();
         private readonly List<Point3d> _multiCloudSeconds = new List<Point3d>();
 
@@ -206,6 +245,13 @@ namespace XAnnotation.Views
                 Interval = TimeSpan.FromMilliseconds(RunWatchdogMs)
             };
             _runWatchdog.Tick += OnRunWatchdogTick;
+            // 「光标回到图纸即开始」的空闲轮询：中望/浩辰没有 PointMonitor，而 Deactivated 只在面板
+            // 失去焦点的一瞬间到达一次（宿主抢焦点那次被宽限期挡掉后就再也没有事件了）。
+            _idleWatch = new DispatcherTimer(DispatcherPriority.Normal)
+            {
+                Interval = TimeSpan.FromMilliseconds(IdleWatchIntervalMs)
+            };
+            _idleWatch.Tick += OnIdleWatchTick;
             // 面板修改只保留为待应用值；真正落盘发生在开始绘制时。
             Loaded += OnPanelLoaded;
             // 用户从别处回到面板（或刚打开）：视作"刚从面板离开"，这样他接着把光标移到图纸就算开始画。
@@ -214,6 +260,11 @@ namespace XAnnotation.Views
                 // 点谁谁在前：面板与「批注设置」都是置顶窗口，被激活时主动顶到最上层，
                 // 不用先关掉另一个才能操作这一个（两个窗口各自独立：各拖各的、各关各的）。
                 WpfWindowUtil.BringToTop(this);
+
+                // 回到面板＝这一段时间的"光标动过"不算数：要重新从面板离开、再动鼠标才算用户去图纸。
+                _cursorMoved = false;
+                _idleDwellTicks = 0;
+                _cursorSample = null;
 
                 // 「批注设置」窗口开着时不算"离开面板去画图"：用户是在配置，不是在画。
                 // 设置窗口压着的正好是图纸，这时候还留着光标触发的话，鼠标划过它就可能莫名开始一轮。
@@ -235,9 +286,12 @@ namespace XAnnotation.Views
                 _closing = true;
                 _restartPending = false;
                 _continuePending = false;
+                _userCancelled = false;
                 _optionStartTimer.Stop();
                 _startDelayTimer.Stop();
                 _runWatchdog.Stop();
+                _idleWatch.Stop();
+                RemoveEscapeHook();
                 UnhookPointMonitor();
                 // 退订设置窗口的"已保存"通知：面板关掉后不该再被它回调。
                 // 注意 **不去关** 设置窗口：两个窗口各自独立关闭，关面板不影响它。
@@ -291,6 +345,7 @@ namespace XAnnotation.Views
         /// （正在跑原生提示时能立刻收手）。本轮结束后标志会自动清掉。</para></summary>
         private void ClosePanel()
         {
+            if (_closing) return;   // 已经在关了：Esc 钩子与 WPF 按键可能各来一次，只认第一次
             try
             {
                 if (_isRunning)
@@ -382,56 +437,174 @@ namespace XAnnotation.Views
             StartWithShape(_currentShape);
         }
 
-        /// <summary>面板失活：如果接住焦点的是 CAD 主窗口，说明用户点了图纸 → 开始画。
-        /// <para>顺手摘掉"光标进图纸"的监听：接下来的启动不再需要它，也避免在 CAD 正常使用时一直挂着。</para></summary>
+        /// <summary>面板失活：只把"光标进图纸"的宿主监听摘掉，**不再在这里启动**。
+        /// <para><b>为什么不启动</b>：这一处只在面板失去焦点的一瞬间到达一次。若宿主自己在面板刚打开时
+        /// 就把焦点抢回去（中望实测 513 ms、浩辰约 1 s），那次失活会被"刚打开"的宽限期挡掉；
+        /// 用户随后点图纸<b>不会再有第二个 Deactivated</b>，整条入口就此死掉，
+        /// 只剩"点外形按钮"能画（用户反馈的原话）。现在统一交给与宿主无关的
+        /// <see cref="OnIdleWatchTick"/> 轮询判断，这条路径因此不再需要。</para></summary>
         private void OnPanelDeactivated(object sender, EventArgs e)
         {
             UnhookPointMonitor();
-            if (_closing || _isRunning || _startPending) return;
+            _idleDwellTicks = 0;
+        }
 
-            // 刚打开的这一瞬不作为启动依据：个别宿主（浩辰）里面板 Show 出来就被 CAD 主窗口夺回焦点，
-            // Deactivated 立刻到达，用户什么都没点就自己排了一轮 —— 既违背"打开只待命"的模型，
-            // 也把 _startPending 挂住，进而让之后所有外形按钮都被忽略。
-            if (_shownUtc != default(DateTime))
+        /// <summary>空闲轮询：面板待命时，只要"光标确实动过、现在落在图纸上、CAD 是前台窗口"
+        /// 连续满足几次，就按当前外形与选项开始一轮。
+        /// <para>与宿主事件无关，四个宿主（AutoCAD 2013-2024 / 2025+ / 中望 / 浩辰）行为一致。
+        /// 刻意要求"光标动过"：宿主把焦点抢回去时用户根本没碰鼠标（面板一露脸就被抢），
+        /// 只有用户自己挪鼠标才说明他是要去图纸上画。</para></summary>
+        private void OnIdleWatchTick(object sender, EventArgs e)
+        {
+            try
             {
-                var sinceShow = (DateTime.UtcNow - _shownUtc).TotalMilliseconds;
-                if (sinceShow < AutoStartGraceMs)
+                SampleCursorMovement();
+
+                if (_closing || !IsReadyToStart || _isRunning || _startPending)
                 {
-                    PluginLog.Info("AnnotationPanel.Deactivated",
-                        "面板刚打开 " + sinceShow.ToString("0") + " ms，判定为宿主夺回焦点而非用户点图纸，不启动。");
+                    _idleDwellTicks = 0;
                     return;
                 }
-            }
 
-            // 光看"谁是前景窗口"不够：CAD 自己在命令收尾时就会把焦点抢回去，那一刻的面板失活
-            // 与"用户点了图纸"长得一模一样。二者只有一处确定性的差别 —— <b>光标在哪儿</b>：
-            // 用户要点图纸，鼠标必然已经离开面板；宿主抢焦点时鼠标通常还停在面板上。
-            // 所以这里只认光标位置，不比时间阈值（浩辰是打开约 1 秒后才被抢焦点，时间阈值根本卡不住）。
-            if (IsCursorOverPanel())
+                // 「批注设置」窗口开着时不算"去图纸画"（用户是在配置）。
+                if (SettingsWindow.IsOpen) { _idleDwellTicks = 0; return; }
+
+                if (!_cursorMoved) { _idleDwellTicks = 0; return; }
+                if (IsCursorOverPanel()) { _idleDwellTicks = 0; return; }
+                if (!IsCursorOverCadWindow()) { _idleDwellTicks = 0; return; }
+                if (!IsCadMainWindowForeground()) { _idleDwellTicks = 0; return; }
+
+                if (++_idleDwellTicks < IdleWatchDwellTicks) return;
+                _idleDwellTicks = 0;
+                StartByTrigger("光标停在图纸上");
+            }
+            catch (Exception ex)
             {
-                PluginLog.Info("AnnotationPanel.Deactivated",
-                    "失活时鼠标仍在面板范围内，判定为宿主抢回焦点而非用户点图纸，不启动。");
-                return;
+                PluginLog.Warning("AnnotationPanel.IdleWatch", ex.Message);
+            }
+        }
+
+        /// <summary>采一次光标位置，判断用户是否动过鼠标（位移 ≥ <see cref="CursorMovedPixels"/> 像素）。</summary>
+        private void SampleCursorMovement()
+        {
+            POINT point;
+            if (!GetCursorPos(out point)) return;
+            var previous = _cursorSample;
+            _cursorSample = point;
+            if (previous == null) return;
+
+            var dx = Math.Abs(point.X - previous.Value.X);
+            var dy = Math.Abs(point.Y - previous.Value.Y);
+            if (dx + dy >= CursorMovedPixels) _cursorMoved = true;
+        }
+
+        /// <summary>鼠标指针此刻是否落在 CAD 主窗口的矩形范围内（拿不到句柄时不拦，退回只判前景窗口）。</summary>
+        private static bool IsCursorOverCadWindow()
+        {
+            try
+            {
+                var main = GetCadMainWindowHandle();
+                if (main == IntPtr.Zero) return true;
+                if (!GetCursorPos(out var point)) return false;
+                if (!GetWindowRect(main, out var rect)) return false;
+                return point.X >= rect.Left && point.X < rect.Right
+                    && point.Y >= rect.Top && point.Y < rect.Bottom;
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("AnnotationPanel.IsCursorOverCadWindow", ex.Message);
+                return true;
+            }
+        }
+
+        // ═══════════════ Esc 退出批注 ═══════════════
+
+        // 需求（2026-10-13）："批注完成后或者不需要批注的时候按 esc 要能退出批注"。
+        // 面板自己有焦点时 Esc 由 Panel_PreviewKeyDown 处理，可是 CAD 命令一跑起来（或用户一点图纸）
+        // 焦点就回到 CAD，那时候的 Esc 根本到不了 WPF。所以这里装一个**线程级**键盘钩子：
+        //   WH_KEYBOARD + 本线程 ID —— 只收本线程（＝ CAD 界面线程）键盘输入，不需要 DLL、
+        //   不影响其它进程；回调里一律 CallNextHookEx，**绝不吞键**，CAD 自己的 Esc 语义原样保留。
+
+        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        private const int WH_KEYBOARD = 2;
+        private const int WM_KEYDOWN = 0x0100;
+        private const int VK_ESCAPE = 0x1B;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        /// <summary>装上 Esc 钩子（幂等）。失败只记日志：没有它 Esc 仍然能在面板有焦点时退出。</summary>
+        private void InstallEscapeHook()
+        {
+            if (_escapeHook != IntPtr.Zero) return;
+            try
+            {
+                _escapeHookProc = OnEscapeKey;
+                _escapeHook = SetWindowsHookEx(WH_KEYBOARD, _escapeHookProc, IntPtr.Zero, GetCurrentThreadId());
+                if (_escapeHook == IntPtr.Zero)
+                {
+                    PluginLog.Warning("AnnotationPanel.EscapeHook", "安装键盘钩子失败，Esc 仅在面板有焦点时生效。");
+                }
+            }
+            catch (Exception ex)
+            {
+                _escapeHook = IntPtr.Zero;
+                PluginLog.Warning("AnnotationPanel.EscapeHook", ex.Message);
+            }
+        }
+
+        private void RemoveEscapeHook()
+        {
+            if (_escapeHook == IntPtr.Zero) return;
+            try { UnhookWindowsHookEx(_escapeHook); }
+            catch (Exception ex) { PluginLog.Warning("AnnotationPanel.EscapeHook(remove)", ex.Message); }
+            _escapeHook = IntPtr.Zero;
+            _escapeHookProc = null;
+        }
+
+        /// <summary>键盘钩子回调：面板空闲时按 Esc ＝ 退出批注（关面板）。
+        /// <para>WH_KEYBOARD 的 <c>wParam</c> 是虚拟键码，<c>lParam</c> 的 bit31 = 1 表示"抬键"。</para>
+        /// <para>整个回调必须吞掉所有异常：异常越过托管/原生边界会直接崩掉 CAD。</para></summary>
+        private IntPtr OnEscapeKey(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            try
+            {
+                var isKeyDown = (lParam.ToInt64() & 0x80000000L) == 0;
+                if (nCode >= 0 && isKeyDown && wParam.ToInt64() == VK_ESCAPE && ShouldExitOnEscape())
+                {
+                    PluginLog.Info("AnnotationPanel.EscapeHook", "面板待命中收到 Esc，退出批注。");
+                    Dispatcher.BeginInvoke(new Action(ClosePanel), DispatcherPriority.Normal);
+                }
+            }
+            catch (Exception ex)
+            {
+                try { PluginLog.Warning("AnnotationPanel.EscapeHook(tick)", ex.Message); } catch { }
             }
 
-            // 异步一小步再判断前景窗口：WM_ACTIVATE 到达时 GetForegroundWindow 可能还没切完。
-            // 优先级取 Normal（不能用 Background）：CAD 主循环长期占着高优先级消息，
-            // 排到 Background 的这一跳可能迟迟轮不到，表现同样是"点了图纸没反应"。
-            Dispatcher.BeginInvoke(
-                new Action(() =>
-                {
-                    try
-                    {
-                        if (_closing || _isRunning || _startPending) return;
-                        if (IsCadMainWindowForeground()) StartByTrigger("焦点回到图纸");
-                        else PluginLog.Info("AnnotationPanel.Deactivated", "失活但前景窗口不是 CAD 主窗口，不启动。");
-                    }
-                    catch (Exception ex)
-                    {
-                        PluginLog.Warning("AnnotationPanel.OnPanelDeactivated", ex.Message);
-                    }
-                }),
-                DispatcherPriority.Normal);
+            // 永不吞键：CAD 自己的 Esc（取消命令、清除选择）必须原样收到。
+            return CallNextHookEx(_escapeHook, nCode, wParam, lParam);
+        }
+
+        /// <summary>这一下 Esc 该由我们处理吗。
+        /// <para>只处理"面板待命、没有交互在跑"的情形：正在跑的那一轮让 CAD 自己取消，
+        /// 取消之后由 <c>StartAnnotation</c> 的收尾逻辑关闭面板，两条路都不重叠。</para></summary>
+        private bool ShouldExitOnEscape()
+        {
+            if (_closing || !IsLoaded) return false;
+            // 用户在配置：Esc 是关「批注设置」窗口。
+            if (SettingsWindow.IsOpen) return false;
+            if (_isRunning || _startPending) return false;
+            return true;
         }
 
         /// <summary>当前前景窗口是不是 <b>CAD 主窗口</b>。
@@ -758,8 +931,11 @@ namespace XAnnotation.Views
         /// <para>所以"打开后先勾多对一 / 仅绘云线"是完全有效的：勾好后回到图纸即按新选项开始。</para></summary>
         private void OnPanelLoaded(object sender, RoutedEventArgs e)
         {
-            // 记下"面板是什么时候露面的"：紧接着的这一小段里，"焦点回图纸"不算用户意图（见 AutoStartGraceMs）。
-            _shownUtc = DateTime.UtcNow;
+            // 开局清空"光标动过"的判定：面板刚露面时宿主可能立刻把焦点抢走，
+            // 那时候用户根本没碰鼠标，不能被当成"要去图纸上画"（见 OnIdleWatchTick）。
+            _cursorMoved = false;
+            _idleDwellTicks = 0;
+            _cursorSample = null;
             try
             {
                 Left = SystemParameters.WorkArea.Left + 20;
@@ -776,6 +952,13 @@ namespace XAnnotation.Views
 
             if (_autoStarted) return;
             _autoStarted = true;
+
+            // 空闲轮询与 Esc 钩子跟"设置窗口是否开着"无关，任何时候都要挂：
+            // 它们自己会在计时器/回调里判断当前能不能启动。
+            try { _idleWatch.Start(); }
+            catch (Exception ex) { PluginLog.Warning("AnnotationPanel.OnPanelLoaded(idleWatch)", ex.Message); }
+            InstallEscapeHook();
+
             // 「批注设置」窗口开着时不挂"光标进图纸"这条入口：用户是在配置，不是在画
             // （设置窗口压着的正好是图纸，鼠标划过它就可能莫名开始一轮）。关掉设置窗口时会重新挂上。
             if (SettingsWindow.IsOpen)
@@ -809,7 +992,12 @@ namespace XAnnotation.Views
                 MultiModeCheck.IsChecked = _s.PanelMultiMode;
                 // 外形放最后：SelectShapeButton 会按外形纠正非法组合（PL线/基点自动取消「多对一」等），
                 // 必须在三个勾选项都恢复完之后再跑。
-                SelectShapeButton(_s.PanelShape);
+                //
+                // ★ 外形一律回到「矩形」，**刻意不沿用上次的选择**（用户 2026-10-13 明确要求
+                //   "进入批注面板后默认就是矩形"）。早先会记忆上次外形，结果试过一次「基点」之后
+                //   长期是基点：中望/浩辰上的表现就是"进面板不是矩形，得先手动点一次矩形才能画"。
+                //   _s.PanelShape 仍然照写不误（只写不读），免得设置文件结构变来变去。
+                SelectShapeButton(DefaultShape);
                 // 纠正后的组合与配置里存的不一致时（例如曾记住「基点 + 多对一」）立刻回写，
                 // 否则每次打开都要再纠正一遍，用户看到的勾选状态与配置文件长期对不上。
                 PersistPanelSelectionIfChanged();
@@ -1290,6 +1478,7 @@ namespace XAnnotation.Views
             _runShape = ResolveShapeToken(shape);
             // 新一轮开始：先清掉上一轮可能残留的中止请求，否则这一轮刚起来就会被立刻取消。
             InteractionAbort.Clear();
+            _userCancelled = false;
             _stage = RunStage.Picking;
 
             try
@@ -1346,6 +1535,10 @@ namespace XAnnotation.Views
                 InteractionAbort.Clear();
                 _stage = RunStage.Idle;
 
+                // "用户自己取消的"只对本轮有效：读到本地变量后立刻清零（下面每条分支都可能 return）。
+                var cancelledByUser = _userCancelled;
+                _userCancelled = false;
+
                 // 绘制期间用户改过绘制选项（如中途勾上"仅绘云线"）→ 按新选项重开，优先于连续绘制。
                 // 注意：这里**不能**用 return，finally 里 return 会吞掉异常。
                 if (_restartPending && IsLoaded && !_closing)
@@ -1354,6 +1547,15 @@ namespace XAnnotation.Views
                     // （给刚被中止的那一轮留一点时间把命令行输出落定）。
                     _continuePending = false;
                     ScheduleOptionStart();
+                }
+                else if (cancelledByUser && IsLoaded && !_closing)
+                {
+                    // 用户按 Esc / 点了取消：本轮不再继续（也不管连续绘制开没开），并且**退出批注**（关面板）。
+                    // 这正是需求"批注完成后或者不需要批注的时候按 esc 要能退出批注" —— 只把本轮停掉不够，
+                    // 面板还开着、连续绘制还记着，用户就会觉得"按了 Esc 没用"。
+                    _continuePending = false;
+                    PluginLog.Info("AnnotationPanel.StartAnnotation", "本轮由用户取消，退出批注并关闭面板。");
+                    ClosePanel();
                 }
                 else if (_continuePending && IsLoaded && !_closing)
                 {
@@ -1368,6 +1570,11 @@ namespace XAnnotation.Views
                     // 否则用户一边看着图纸一边按 Esc 取消时，光标还停在图纸上，会被立刻判定成"又要开始"。
                     // 想再开始：回面板点一下（或点外形按钮 / 按回车）。
                     _panelLeaveUtc = DateTime.MinValue;
+                    // 同理：本轮作废之后要重新动一下鼠标才算"用户要去画"，
+                    // 否则光标一直停在图纸上、下一轮一待命就会自己又开一轮。
+                    _cursorMoved = false;
+                    _idleDwellTicks = 0;
+                    _cursorSample = null;
                 }
             }
         }
@@ -1477,7 +1684,11 @@ namespace XAnnotation.Views
 
             if (!AnnotationService.PromptBasePoint(doc, out var basePoint))
             {
-                if (!InteractionAbort.Requested) doc.Editor.WriteMessage("\n已取消基点选择。");
+                if (!InteractionAbort.Requested)
+                {
+                    doc.Editor.WriteMessage("\n已取消基点选择。");
+                    MarkUserCancelled();
+                }
                 return;
             }
 
@@ -1527,6 +1738,7 @@ namespace XAnnotation.Views
             if (!contentOk)
             {
                 doc.Editor.WriteMessage("\n已在填写内容阶段取消基点批注。");
+                MarkUserCancelled();
                 return;
             }
 
@@ -1552,7 +1764,11 @@ namespace XAnnotation.Views
         private void DoPlineCloud(Document doc, AnnotationData data)
         {
             var points = CollectPlinePoints(doc, _runSettings, out var cancelled);
-            if (cancelled || points == null) return;
+            if (cancelled || points == null)
+            {
+                if (cancelled) MarkUserCancelled();
+                return;
+            }
             var ucsMatrix=AnnotationService.GetUcsMatrix(doc);var wcsToUcs=ucsMatrix.Inverse();var localPoints=points.Select(p=>p.TransformBy(wcsToUcs)).ToList();
             var polygonPoints=localPoints.Select(p=>new Point2d(p.X,p.Y)).ToList();
             if(!AnnotationService.ValidateCloudPolygon(polygonPoints,out var validationError)){doc.Editor.WriteMessage("\n"+validationError);return;}
@@ -1573,7 +1789,7 @@ namespace XAnnotation.Views
             if (effective.FontAutoFit) doc.Editor.WriteMessage($"\n云线范围: {w:0.#}×{h:0.#}  字高: {effective.TextHeight:0.###}  云线半径: {effective.CloudRadius:0.###}");
             // 折线已定：本轮的外形与尺寸自此定型（后续步骤不再受面板改动影响，见 RunStage）。
             _stage = RunStage.Content;
-            if (!CadDialog.ShowAnnotation(data, false)){doc.Editor.WriteMessage("\n已在填写内容阶段取消 PL 批注。");return;}
+            if (!CadDialog.ShowAnnotation(data, false)){doc.Editor.WriteMessage("\n已在填写内容阶段取消 PL 批注。");MarkUserCancelled();return;}
             _stage = RunStage.Elsewhere;
             var placementResult=AnnotationService.PromptPlacement(doc,effective,_runSettings,null,null,points,points[points.Count-1],PlacementGeometryKind.Polygon,data);if(!AcceptInteraction(doc,placementResult))return;var textPointWcs=placementResult.Point;
             AnnotationService.CreatePlineCloud(doc, data, effective, points, textPointWcs);
@@ -1594,6 +1810,7 @@ namespace XAnnotation.Views
                 if (!InteractionAbort.Requested)
                 {
                     doc.Editor.WriteMessage("\n已取消单区域范围选择。");
+                    MarkUserCancelled();
                 }
                 return;
             }
@@ -1616,7 +1833,7 @@ namespace XAnnotation.Views
 
             // 完整批注：先填写内容，再定位批注框（预览按真实内容显示文字与框体）并落图。
             if (beffective.FontAutoFit) doc.Editor.WriteMessage($"\n云线对角线: {bdiagonal:0.#}  字高: {beffective.TextHeight:0.###}  云线半径: {beffective.CloudRadius:0.###}");
-            if (!CadDialog.ShowAnnotation(data, false)){doc.Editor.WriteMessage("\n已在填写内容阶段取消单区域批注。");return;}
+            if (!CadDialog.ShowAnnotation(data, false)){doc.Editor.WriteMessage("\n已在填写内容阶段取消单区域批注。");MarkUserCancelled();return;}
             _stage = RunStage.Elsewhere;
             var placementResult=AnnotationService.PromptPlacement(doc,beffective,settings,new[]{f},new[]{s},null,s,PlacementGeometryKind.Region,data);if(!AcceptInteraction(doc,placementResult))return;var textPt=placementResult.Point;
             AnnotationService.Create(doc, data, beffective, f, s, textPt);
@@ -1663,6 +1880,7 @@ namespace XAnnotation.Views
 
                     if (promptResult == CloudPromptResult.Cancelled)
                     {
+                        MarkUserCancelled();
                         return;
                     }
 
@@ -1736,6 +1954,7 @@ namespace XAnnotation.Views
                 {
                     doc.Editor.WriteMessage(
                         "\n已在填写内容阶段取消多对一批注。");
+                    MarkUserCancelled();
                     return;
                 }
 
@@ -1778,7 +1997,7 @@ namespace XAnnotation.Views
 
         // ═══════════════ 工具方法 ═══════════════
 
-        private static List<Point3d> CollectPlinePoints(
+        private List<Point3d> CollectPlinePoints(
             Document doc,
             AnnotationSettings settings,
             out bool cancelled)
@@ -1825,13 +2044,22 @@ namespace XAnnotation.Views
             return points;
         }
 
-        private static bool AcceptInteraction(Document doc,AnnotationService.InteractionResult result)
+        /// <summary>标记"这一轮是用户自己取消的"（CAD 提示被 Esc 取消 / 内容窗点了取消）。
+        /// <para>本轮结束时据此退出批注（关面板）。插件自己为了换外形/改选项而中止的那条路走
+        /// <see cref="InteractionAbort"/>，不经过这里，所以不会被误判。</para></summary>
+        private void MarkUserCancelled()
+        {
+            if (InteractionAbort.Requested) return;
+            _userCancelled = true;
+        }
+
+        private bool AcceptInteraction(Document doc,AnnotationService.InteractionResult result)
         {
             if(result.Status==AnnotationService.InteractionStatus.Accepted)return true;
             // 本轮是"面板改了绘制选项"被主动中止的：不必再报一次"已取消"，真正原因由中止方与重开逻辑说明。
             if(InteractionAbort.Requested)return false;
             var message=$"{result.Stage}：{result.PromptStatus}";
-            if(result.Status==AnnotationService.InteractionStatus.Cancelled){doc.Editor.WriteMessage("\n已取消"+message+"。");return false;}
+            if(result.Status==AnnotationService.InteractionStatus.Cancelled){doc.Editor.WriteMessage("\n已取消"+message+"。");MarkUserCancelled();return false;}
             doc.Editor.WriteMessage("\n交互失败："+message+"。");PluginLog.Warning("Interaction",message);return false;
         }
 
