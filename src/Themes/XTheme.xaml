@@ -31,8 +31,28 @@
         <Setter Property="Background" Value="{StaticResource BackgroundBrush}"/>
         <Setter Property="UseLayoutRounding" Value="True"/>
         <Setter Property="SnapsToDevicePixels" Value="True"/>
-        <Setter Property="WindowStartupLocation" Value="CenterScreen"/>
+        <!-- TextOptions.TextFormattingMode 是合规的附加 DependencyProperty，放 Setter 里没问题（已实测）。 -->
         <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+        <!--
+          【禁止】在这里放 WindowStartupLocation 的 Setter（原先是 Value="CenterScreen"，已删除）。
+
+          WindowStartupLocation 是纯 CLR 属性 —— Window 上并没有 WindowStartupLocationProperty
+          这个 DependencyProperty，而 Style 的 Setter.Property **只接受 DependencyProperty**。
+          一旦放进来，BAML 会在运行期把该属性解析成 null，随后 Setter.CheckValidProperty(null) 抛：
+
+              System.ArgumentNullException: 值不能为 null。参数名: property
+
+          编译期不会报错（BAML 的属性解析推迟到运行期），所以**编译通过不等于能跑**。
+
+          本样式目前不会被实例化（各窗口都是 Window 的派生类，而 WPF 的隐式样式按确切类型查找，
+          匹配不到 TargetType=Window），所以这行原本只是**潜伏**着、不发作；
+          但只要今后有人给窗口显式指定 Style、或写 BasedOn 指向隐式 Window 样式，
+          就会立刻整窗崩溃 —— 这正是 2026-10-13 那次 X-批注 1.1.1 崩溃的真凶。
+
+          确实需要窗口居中时，请写在**各窗口自己的 XAML** 上，作为元素属性直接写：
+              WindowStartupLocation="CenterScreen"
+          元素属性走 SetValue，不经过 Style Setter，是安全的。
+        -->
     </Style>
 
     <Style TargetType="TextBlock">

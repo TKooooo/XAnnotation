@@ -11,7 +11,12 @@
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <UseWPF>true</UseWPF>
     <DefineConstants>ZWCAD</DefineConstants>
-    <ZwcadDir Condition="'$(ZwcadDir)' == ''">C:\Program Files\ZWSOFT\ZWCAD Enterprise</ZwcadDir>
+    <!-- 中望 ZWCAD 的托管 API 就在安装目录根下：ZwManaged.dll + ZwDatabaseMgd.dll。
+         换机器/换版本时用命令行覆盖：
+           dotnet build src\XAnnotation.csproj -c Release -p:ZwcadDir="D:\path\to\ZWCAD 20xx" -->
+    <ZwcadDir Condition="'$(ZwcadDir)' == ''">C:\Program Files\ZWSOFT\ZWCAD 2026</ZwcadDir>
+    <!-- 老版本装在 ...\ZWSOFT\ZWCAD Enterprise 时自动回退 -->
+    <ZwcadDir Condition="!Exists('$(ZwcadDir)\ZwManaged.dll') And Exists('C:\Program Files\ZWSOFT\ZWCAD Enterprise\ZwManaged.dll')">C:\Program Files\ZWSOFT\ZWCAD Enterprise</ZwcadDir>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="ZwManaged"><HintPath>$(ZwcadDir)\ZwManaged.dll</HintPath><Private>false</Private></Reference>
