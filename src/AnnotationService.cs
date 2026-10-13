@@ -9,6 +9,14 @@ using ZwSoft.ZwCAD.DatabaseServices;
 using ZwSoft.ZwCAD.EditorInput;
 using ZwSoft.ZwCAD.Geometry;
 using ZwSoft.ZwCAD.Runtime;
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+using Gssoft.Gscad.ApplicationServices;
+using Gssoft.Gscad.Colors;
+using Gssoft.Gscad.DatabaseServices;
+using Gssoft.Gscad.EditorInput;
+using Gssoft.Gscad.Geometry;
+using Gssoft.Gscad.Runtime;
 #else
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Colors;
@@ -3673,6 +3681,10 @@ namespace XAnnotation
 #if ZWCAD
         private static object CadSystemVariable(string name)=>ZwSoft.ZwCAD.ApplicationServices.Core.Application.GetSystemVariable(name);
         private static void SetCadSystemVariable(string name,object value)=>ZwSoft.ZwCAD.ApplicationServices.Core.Application.SetSystemVariable(name,value);
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+        private static object CadSystemVariable(string name)=>Gssoft.Gscad.ApplicationServices.Core.Application.GetSystemVariable(name);
+        private static void SetCadSystemVariable(string name,object value)=>Gssoft.Gscad.ApplicationServices.Core.Application.SetSystemVariable(name,value);
 #else
 #if ACAD_PRE2013
         private static object CadSystemVariable(string name)=>Autodesk.AutoCAD.ApplicationServices.Application.GetSystemVariable(name);

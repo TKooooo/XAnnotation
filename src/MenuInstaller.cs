@@ -3,6 +3,10 @@ using System.Reflection;
 #if ZWCAD
 using UiApplication = ZwSoft.ZwCAD.ApplicationServices.Application;
 using CadApplication = ZwSoft.ZwCAD.ApplicationServices.Core.Application;
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+using UiApplication = Gssoft.Gscad.ApplicationServices.Application;
+using CadApplication = Gssoft.Gscad.ApplicationServices.Core.Application;
 #elif ACAD_CORE
 using UiApplication = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 using CadApplication = Autodesk.AutoCAD.ApplicationServices.Core.Application;
@@ -27,6 +31,10 @@ namespace XAnnotation
         private const string MenuName = "X-批注";
 #if ZWCAD
         private const string PreferredMenuGroupName = "ZWCAD";
+#elif GSCAD
+        // 浩辰主菜单组名取自其主 CUI（gcad.cuix）的 <MenuGroup Name="GCAD" DisplayName="GstarCAD">。
+        // 若该组名匹配不到，Ensure() 会自动回退到菜单组集合的第 0 项，所以写错只会选不到首选组、不会失败。
+        private const string PreferredMenuGroupName = "GCAD";
 #else
         private const string PreferredMenuGroupName = "ACAD";
 #endif

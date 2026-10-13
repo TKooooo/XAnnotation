@@ -28,14 +28,16 @@ rem  variable name is parsed as the end of a parenthesised block and
 rem  shreds every line after it.
 rem
 rem  Modes, default = auto:
-rem    build.cmd            auto    net8.0-windows + net45
-rem                                 AutoCAD 2025-2027 and 2015-2024
-rem    build.cmd 2025       net8.0-windows only   AutoCAD 2025-2027
-rem    build.cmd legacy     net45 only            AutoCAD 2015-2024
-rem    build.cmd 2012       net40 only            AutoCAD 2012-2014,
+rem    build.cmd            auto    net40 AutoCAD 2013-2024
+rem                                 + net8.0-windows AutoCAD 2025-2026
+rem    build.cmd 2025       net8.0-windows only   AutoCAD 2025-2026
+rem    build.cmd legacy     net40 only            AutoCAD 2013-2024
+rem                                 aliases: acad, 2014
+rem    build.cmd 2012       net40 only            AutoCAD 2012,
 rem                                 built only when the AutoCAD 2012
 rem                                 assemblies are present
-rem    build.cmd zwcad      auto + net472         ZWCAD, needs ZWCAD
+rem    build.cmd zwcad      auto + net472         ZWCAD
+rem    build.cmd gscad      auto + net8           GstarCAD
 rem    build.cmd all        everything
 rem    build.cmd release    auto, then copy the fresh DLLs into
 rem                                 EVERY ..\v0.5* folder next to this
@@ -53,13 +55,30 @@ rem  The .NET SDK is located automatically: PATH first, then the
 rem  default install folder - so a double-click works even in a cmd
 rem  window that has no dotnet in PATH.
 rem
-rem  net45 / net472 normally need the matching .NET Framework
-rem  targeting pack, which ships with Visual Studio. Both projects
-rem  reference Microsoft.NETFramework.ReferenceAssemblies, so a
-rem  plain .NET SDK is enough - no MSB3644 any more.
+rem  net40 / net472 normally need the matching .NET Framework
+rem  targeting pack, which ships with Visual Studio. All net4x
+rem  projects reference Microsoft.NETFramework.ReferenceAssemblies,
+rem  so a plain .NET SDK is enough - no MSB3644 any more.
 rem
 rem  NuGet restore needs nuget.org, or your company mirror
 rem  configured in a NuGet.config next to this script.
+rem
+rem  Host API folders, override with these environment variables:
+rem    X_ACAD_API_DIR  folder holding acdbmgd/acmgd/accoremgd,
+rem                    for the net40 AutoCAD 2013-2024 target.
+rem                    Default: C:\Program Files\Autodesk\AutoCAD 2014
+rem    X_ACAD2012_DIR  folder holding acdbmgd.dll + acmgd.dll of
+rem                    AutoCAD 2012, for the net40 2012 target.
+rem                    Default: C:\Program Files\Autodesk\AutoCAD 2012
+rem    X_ZWCAD_DIR     ZWCAD install folder.
+rem                    Default is tried in this order:
+rem                      C:\Program Files\ZWSOFT\ZWCAD 2026
+rem                      C:\Program Files\ZWSOFT\ZWCAD Enterprise
+rem    X_GSCAD_DIR     GstarCAD install folder.
+rem                    The default lives in the csproj, because the
+rem                    real folder name is not ASCII and this .cmd must
+rem                    stay ASCII. Set X_GSCAD_DIR only for a custom
+rem                    install location.
 rem
 rem  The 2012 target cannot come from NuGet: the AutoCAD.NET package
 rem  starts at 20.0.0, which is AutoCAD 2015. It therefore references
@@ -110,13 +129,17 @@ set "BUILD_2025=0"
 set "BUILD_LEGACY=0"
 set "BUILD_2012=0"
 set "BUILD_ZWCAD=0"
+set "BUILD_GSCAD=0"
 
 if /i "%MODE%"=="auto"    (set "BUILD_2025=1" & set "BUILD_LEGACY=1" & set "VALID=1")
 if /i "%MODE%"=="2025"    (set "BUILD_2025=1" & set "VALID=1")
 if /i "%MODE%"=="legacy"  (set "BUILD_LEGACY=1" & set "VALID=1")
+if /i "%MODE%"=="acad"    (set "BUILD_LEGACY=1" & set "VALID=1")
+if /i "%MODE%"=="2014"    (set "BUILD_LEGACY=1" & set "VALID=1")
 if /i "%MODE%"=="2012"    (set "BUILD_2012=1" & set "VALID=1")
 if /i "%MODE%"=="zwcad"   (set "BUILD_2025=1" & set "BUILD_LEGACY=1" & set "BUILD_ZWCAD=1" & set "VALID=1")
-if /i "%MODE%"=="all"     (set "BUILD_2025=1" & set "BUILD_LEGACY=1" & set "BUILD_2012=1" & set "BUILD_ZWCAD=1" & set "VALID=1")
+if /i "%MODE%"=="gscad"   (set "BUILD_2025=1" & set "BUILD_LEGACY=1" & set "BUILD_GSCAD=1" & set "VALID=1")
+if /i "%MODE%"=="all"     (set "BUILD_2025=1" & set "BUILD_LEGACY=1" & set "BUILD_2012=1" & set "BUILD_ZWCAD=1" & set "BUILD_GSCAD=1" & set "VALID=1")
 if /i "%MODE%"=="release" (set "BUILD_2025=1" & set "BUILD_LEGACY=1" & set "DEPLOY=1" & set "VALID=1")
 
 if "%VALID%"=="0" (
@@ -125,9 +148,10 @@ if "%VALID%"=="0" (
     set "BUILD_LEGACY=0"
     set "BUILD_2012=0"
     set "BUILD_ZWCAD=0"
+    set "BUILD_GSCAD=0"
     echo.
     echo [ERROR] Unknown mode "%MODE%".
-    echo         Use one of: auto ^| 2025 ^| legacy ^| 2012 ^| zwcad ^| all ^| release
+    echo         Use one of: auto ^| 2025 ^| legacy ^| 2012 ^| zwcad ^| gscad ^| all ^| release
     echo.
 )
 
@@ -135,7 +159,7 @@ echo.
 echo ==== XAnnotation build ====
 echo Project root : %ROOT%
 echo Mode         : %MODE%
-echo Targets      : 2025=%BUILD_2025%  legacy=%BUILD_LEGACY%  2012=%BUILD_2012%  zwcad=%BUILD_ZWCAD%
+echo Targets      : 2025=%BUILD_2025%  acad2013-2024=%BUILD_LEGACY%  2012=%BUILD_2012%  zwcad=%BUILD_ZWCAD%  gscad=%BUILD_GSCAD%
 echo.
 
 rem  Locate the .NET SDK. No parentheses in these paths on purpose.
@@ -151,6 +175,7 @@ if not defined DOTNET (
     set "BUILD_LEGACY=0"
     set "BUILD_2012=0"
     set "BUILD_ZWCAD=0"
+    set "BUILD_GSCAD=0"
     echo [ERROR] dotnet was not found, neither in PATH nor at
     echo         "%ProgramFiles%\dotnet\dotnet.exe".
     echo         Install the .NET SDK 8.0 or newer from
@@ -163,6 +188,26 @@ if not defined DOTNET (
     "!DOTNET!" --version
     echo.
 )
+
+rem  API folder for the net40 AutoCAD 2013-2024 target. Computed OUTSIDE
+rem  the build blocks on purpose: a "for /d" loop must never run inside a
+rem  parenthesised block, and %ProgramFiles% is deliberately avoided.
+set "ACADAPIDIR=C:\Program Files\Autodesk\AutoCAD 2014"
+set "ACADAPIARG="
+if not "%X_ACAD_API_DIR%"=="" set "ACADAPIDIR=%X_ACAD_API_DIR%"
+if not "%X_ACAD_API_DIR%"=="" set "ACADAPIARG=-p:AcadApiDir=%X_ACAD_API_DIR%"
+if "%X_ACAD_API_DIR%"=="" if not exist "!ACADAPIDIR!\accoremgd.dll" for /d %%D in ("%SystemDrive%\Program Files\Autodesk\AutoCAD 20*") do if exist "%%~fD\accoremgd.dll" set "ACADAPIDIR=%%~fD"
+
+rem  ZWCAD install folder: prefer the recent "ZWCAD 2026" layout.
+set "ZWCADDIR=C:\Program Files\ZWSOFT\ZWCAD 2026"
+if not exist "!ZWCADDIR!\ZwManaged.dll" set "ZWCADDIR=C:\Program Files\ZWSOFT\ZWCAD Enterprise"
+if not "%X_ZWCAD_DIR%"=="" set "ZWCADDIR=%X_ZWCAD_DIR%"
+
+rem  GstarCAD install folder. The real path is not ASCII, so the default
+rem  lives in src\XAnnotation.GstarCAD.csproj and is only overridden here
+rem  when X_GSCAD_DIR is set.
+set "GSCADARG="
+if not "%X_GSCAD_DIR%"=="" set "GSCADARG=-p:GscadDir=%X_GSCAD_DIR%"
 
 if "%BUILD_2025%"=="1" (
     echo ------------------------------------------------------------
@@ -177,12 +222,22 @@ if "%BUILD_2025%"=="1" (
 
 if "%BUILD_LEGACY%"=="1" (
     echo ------------------------------------------------------------
-    echo  XAnnotation.AutoCAD       net45            AutoCAD 2015-2024
+    echo  XAnnotation.AutoCAD       net40            AutoCAD 2013-2024
     echo ------------------------------------------------------------
-    "!DOTNET!" build "%SRC%\XAnnotation.AutoCAD.csproj" -c Release -v minimal --nologo >>"%LOG%" 2>&1
-    set "RC=!ERRORLEVEL!"
-    type "%LOG%"
-    if not "!RC!"=="0" set "FAILED=1"
+    if exist "!ACADAPIDIR!\acdbmgd.dll" if exist "!ACADAPIDIR!\acmgd.dll" if exist "!ACADAPIDIR!\accoremgd.dll" (
+        "!DOTNET!" build "%SRC%\XAnnotation.AutoCAD.csproj" -c Release -v minimal --nologo !ACADAPIARG! >>"%LOG%" 2>&1
+        set "RC=!ERRORLEVEL!"
+        type "%LOG%"
+        if not "!RC!"=="0" set "FAILED=1"
+    ) else (
+        echo [SKIP] AutoCAD 2013-2024 managed assemblies not found at
+        echo        "!ACADAPIDIR!".
+        echo        Install any AutoCAD from 2013 to 2024, or point the
+        echo        build at a folder holding acdbmgd.dll, acmgd.dll and
+        echo        accoremgd.dll:
+        echo            set X_ACAD_API_DIR=D:\path\to\acad2022
+        echo            build.cmd %MODE%
+    )
     echo.
 )
 
@@ -209,7 +264,6 @@ if "%BUILD_2012%"=="1" (
 )
 
 if "%BUILD_ZWCAD%"=="1" (
-    set "ZWCADDIR=C:\Program Files\ZWSOFT\ZWCAD Enterprise"
     if not exist "!ZWCADDIR!\ZwManaged.dll" (
         echo [SKIP] ZWCAD not found at "!ZWCADDIR!".
         echo        Install ZWCAD, or build it explicitly with:
@@ -224,6 +278,17 @@ if "%BUILD_ZWCAD%"=="1" (
         if not "!RC!"=="0" set "FAILED=1"
         echo.
     )
+)
+
+if "%BUILD_GSCAD%"=="1" (
+    echo ------------------------------------------------------------
+    echo  XAnnotation.GstarCAD      net8.0-windows   GstarCAD
+    echo ------------------------------------------------------------
+    "!DOTNET!" build "%SRC%\XAnnotation.GstarCAD.csproj" -c Release -v minimal --nologo !GSCADARG! >>"%LOG%" 2>&1
+    set "RC=!ERRORLEVEL!"
+    type "%LOG%"
+    if not "!RC!"=="0" set "FAILED=1"
+    echo.
 )
 
 if "%FAILED%"=="0" if "%DEPLOY%"=="1" (
@@ -256,13 +321,13 @@ if "%FAILED%"=="0" if "%DEPLOY%"=="1" (
             copy /Y "%ROOT%bin-acad2012\XAnnotation.AutoCAD2012.dll" "%%T\net40\" >nul
             if exist "%ROOT%bin-acad2012\XAnnotation.AutoCAD2012.pdb" copy /Y "%ROOT%bin-acad2012\XAnnotation.AutoCAD2012.pdb" "%%T\net40\" >nul
             if exist "%ROOT%bin-acad2012\System.ValueTuple.dll" copy /Y "%ROOT%bin-acad2012\System.ValueTuple.dll" "%%T\net40\" >nul
-            echo   net40  -^> %%T\XAnnotation.AutoCAD2012.dll
+            echo   net40        -^> %%T\XAnnotation.AutoCAD2012.dll
         )
-        if exist "%ROOT%bin-acad\XAnnotation.AutoCAD.dll" (
-            copy /Y "%ROOT%bin-acad\XAnnotation.AutoCAD.dll" "%%T\net45\" >nul
-            if exist "%ROOT%bin-acad\XAnnotation.AutoCAD.pdb" copy /Y "%ROOT%bin-acad\XAnnotation.AutoCAD.pdb" "%%T\net45\" >nul
-            if exist "%ROOT%bin-acad\System.ValueTuple.dll" copy /Y "%ROOT%bin-acad\System.ValueTuple.dll" "%%T\net45\" >nul
-            echo   net45  -^> %%T\XAnnotation.AutoCAD.dll
+        if exist "%ROOT%bin-acad2013-2024\XAnnotation.AutoCAD.dll" (
+            copy /Y "%ROOT%bin-acad2013-2024\XAnnotation.AutoCAD.dll" "%%T\net40\" >nul
+            if exist "%ROOT%bin-acad2013-2024\XAnnotation.AutoCAD.pdb" copy /Y "%ROOT%bin-acad2013-2024\XAnnotation.AutoCAD.pdb" "%%T\net40\" >nul
+            if exist "%ROOT%bin-acad2013-2024\System.ValueTuple.dll" copy /Y "%ROOT%bin-acad2013-2024\System.ValueTuple.dll" "%%T\net40\" >nul
+            echo   net40 2013-24 -^> %%T\XAnnotation.AutoCAD.dll
         )
         if exist "%ROOT%bin-acad2025-2027\XAnnotation.AutoCAD2025.dll" (
             copy /Y "%ROOT%bin-acad2025-2027\XAnnotation.AutoCAD2025.dll" "%%T\net8.0-windows\" >nul
@@ -307,9 +372,10 @@ if "%FAILED%"=="1" (
     echo.
     echo Output DLLs:
     if exist "%ROOT%bin-acad2025-2027\XAnnotation.AutoCAD2025.dll" echo   %ROOT%bin-acad2025-2027\XAnnotation.AutoCAD2025.dll
-    if exist "%ROOT%bin-acad\XAnnotation.AutoCAD.dll" echo   %ROOT%bin-acad\XAnnotation.AutoCAD.dll
+    if exist "%ROOT%bin-acad2013-2024\XAnnotation.AutoCAD.dll" echo   %ROOT%bin-acad2013-2024\XAnnotation.AutoCAD.dll
     if exist "%ROOT%bin-acad2012\XAnnotation.AutoCAD2012.dll" echo   %ROOT%bin-acad2012\XAnnotation.AutoCAD2012.dll
     if exist "%ROOT%bin\XAnnotation.ZWCAD.dll" echo   %ROOT%bin\XAnnotation.ZWCAD.dll
+    if exist "%ROOT%bin-gscad\XAnnotation.GstarCAD.dll" echo   %ROOT%bin-gscad\XAnnotation.GstarCAD.dll
     echo.
     echo Load the DLL in CAD with NETLOAD, then run X_PZ_MENU to rebuild the menu.
     echo.

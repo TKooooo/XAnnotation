@@ -7,6 +7,10 @@ using System.Text.RegularExpressions;
 #if ZWCAD
 using ZwSoft.ZwCAD.ApplicationServices;
 using CadApplication = ZwSoft.ZwCAD.ApplicationServices.Core.Application;
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+using Gssoft.Gscad.ApplicationServices;
+using CadApplication = Gssoft.Gscad.ApplicationServices.Core.Application;
 #else
 using Autodesk.AutoCAD.ApplicationServices;
 #if ACAD_PRE2013

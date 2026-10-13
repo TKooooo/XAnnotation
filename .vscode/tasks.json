@@ -25,19 +25,10 @@
       "presentation": { "reveal": "always", "panel": "shared", "clear": true }
     },
     {
-      "label": "构建：AutoCAD 2015~2024（net45）",
+      "label": "构建：AutoCAD 2013~2024（net40）",
       "type": "shell",
       "command": "build.cmd",
       "args": ["legacy"],
-      "group": "build",
-      "problemMatcher": "$msCompile",
-      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
-    },
-    {
-      "label": "构建：AutoCAD 2013~2014（net40）",
-      "type": "shell",
-      "command": "build.cmd",
-      "args": ["2014"],
       "group": "build",
       "problemMatcher": "$msCompile",
       "presentation": { "reveal": "always", "panel": "shared", "clear": true }
@@ -70,10 +61,19 @@
       "presentation": { "reveal": "always", "panel": "shared", "clear": true }
     },
     {
-      "label": "构建：全部（含部署）",
+      "label": "构建：全部目标（含 2012 / ZWCAD / 浩辰）",
       "type": "shell",
       "command": "build.cmd",
       "args": ["all"],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "构建：全部（含部署）",
+      "type": "shell",
+      "command": "build.cmd",
+      "args": ["release"],
       "group": "build",
       "problemMatcher": "$msCompile",
       "presentation": { "reveal": "always", "panel": "shared", "clear": true }
@@ -84,7 +84,7 @@
       "command": "cmd",
       "args": [
         "/c",
-        "for /d %d in (bin-acad bin-acad2012 bin-acad2014 bin-acad2013-2024 bin-acad2025-2027 bin-zwcad bin-gscad src\\obj) do @if exist %d rmdir /s /q %d"
+        "for /d %d in (bin-acad2012 bin-acad2013-2024 bin-acad2025-2027 bin bin-gscad src\\obj) do @if exist %d rmdir /s /q %d"
       ],
       "problemMatcher": [],
       "presentation": { "reveal": "always", "panel": "shared", "clear": true }

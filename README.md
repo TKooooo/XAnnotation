@@ -31,19 +31,47 @@
 
 从 GitHub Releases 下载 `XAnnotation-v0.5.2.zip` 并完整解压，再按 CAD 宿主选择 DLL：
 
-| CAD 宿主             | DLL                                             |
-| ------------------ | ----------------------------------------------- |
-| AutoCAD 2012~2014  | `bin-acad2012/XAnnotation.AutoCAD2012.dll`      |
-| AutoCAD 2015~2024  | `bin-acad/XAnnotation.AutoCAD.dll`              |
-| AutoCAD 2025~2027  | `bin-acad2025-2027/XAnnotation.AutoCAD2025.dll` |
-| 中望 ZWCAD 2025~2026 | `bin/XAnnotation.ZWCAD.dll`                     |
+| CAD 宿主                | DLL                                              | 目标框架             |
+| --------------------- | ------------------------------------------------ | ---------------- |
+| AutoCAD 2013~2024     | `bin-acad2013-2024/XAnnotation.AutoCAD.dll`      | .NET Framework 4.0 |
+| AutoCAD 2025~2027     | `bin-acad2025-2027/XAnnotation.AutoCAD2025.dll`  | .NET 8           |
+| 中望 ZWCAD 2025~2026    | `bin/XAnnotation.ZWCAD.dll`                      | .NET Framework 4.7.2 |
+| 浩辰 GstarCAD 2025~2026 | `bin-gscad/XAnnotation.GstarCAD.dll`             | .NET 8           |
+| AutoCAD 2012（可选）     | `bin-acad2012/XAnnotation.AutoCAD2012.dll`       | .NET Framework 4.0 |
 
-**注意**：四个 DLL 不可混用，请严格按 CAD 宿主和版本选择；DLL 同目录内的依赖文件也必须保留。
+**注意**：这些 DLL 不可混用，请严格按 CAD 宿主选择；DLL 同目录内的依赖文件（`System.ValueTuple.dll`、`System.Drawing.Common.dll`）也必须一并保留在同一目录。
 
-> **为什么 2012~2014 要单独一个 DLL**：AutoCAD 2013 的 "The Big Split" 是 .NET API 的二进制兼容断点  
-> —— API 实现从 `acad.exe` 迁到 `AcCore.dll`、声明从 `acmgd.dll` 迁到 `accoremgd.dll`，  
-> 并且 `Autodesk.AutoCAD.ApplicationServices.Core` 命名空间从 2013 才存在。  
+> **为什么 2013~2024 能只出一个 DLL**
+>
+> 1. **钉 `net40`**：AutoCAD 2013/2014 支持的 .NET Framework 是 **4.0**，2015 起才升到 4.5。
+>    但两者跑的是**同一个 CLR 4.0.30319**，`net40` 产物能被 4.5+ 直接加载 —— 反过来不行。
+>    只装了 .NET 4.0 的机器（Win7 上很常见）加载 `net45` 产物会直接失败。
+> 2. **AutoCAD 托管程序集未签名**（`PublicKeyToken=null`）：CLR 对未签名程序集**只按简单名**在进程已加载程序集里查找，
+>    **版本号不参与匹配**，所以对着 2014 的 `acdbmgd/acmgd/accoremgd`（19.1）编的插件能装到 2015~2024。
+> 3. **必须是 `AnyCPU`**：2013/2014 有大量 32 位安装，改成 `x64` 会让它们拒绝加载。
+>
+> 编译时 API 目录默认取 `C:\Program Files\Autodesk\AutoCAD 2014`，可用 `-p:AcadApiDir="D:\AutoCAD 2022"` 指定
+> （只要有 `acdbmgd.dll` / `acmgd.dll` / `accoremgd.dll` 三个文件即可，不要求完整安装）。
+
+> **AutoCAD 2012 为什么要单独一个 DLL**：AutoCAD 2013 的 "The Big Split" 是 .NET API 的二进制兼容断点
+> —— API 实现从 `acad.exe` 迁到 `AcCore.dll`、声明从 `acmgd.dll` 迁到 `accoremgd.dll`，
+> 并且 `Autodesk.AutoCAD.ApplicationServices.Core` 命名空间从 2013 才存在。
 > 因此针对 2013+ 编译的程序集在 2012 上**加载不了**，2012 必须对着它自己的 `acdbmgd.dll` / `acmgd.dll` 编译。
+
+### 1.1 系统兼容性（Windows 7 / 10 / 11）
+
+本版所有产物均可在 **Win7 SP1 / Win10 / Win11** 上运行，关键点：
+
+| 产物                     | 依赖                                          | Win7 是否可用 |
+| ---------------------- | ------------------------------------------- | --------- |
+| `XAnnotation.AutoCAD.dll`（2013~2024） | .NET Framework **4.0**                      | ✅ Win7 自带/可装 4.0 |
+| `XAnnotation.AutoCAD2012.dll`      | .NET Framework 4.0                          | ✅         |
+| `XAnnotation.ZWCAD.dll`            | .NET Framework 4.7.2（中望 2026 自身要求）        | ✅（需装 4.7.2） |
+| `XAnnotation.AutoCAD2025.dll`      | .NET 8（**需要 Win10 1607 以上**，AutoCAD 2025 本身也不支持 Win7） | ❌ 目标平台所限 |
+| `XAnnotation.GstarCAD.dll`         | .NET 8（同上，浩辰 2026 自身要求）                     | ❌ 目标平台所限 |
+
+即：**Win7 用户请用 `bin-acad2013-2024` 或 `bin-acad2012` 那份**（AutoCAD 2013~2024 全部可用）；
+`net8` 两份受 .NET 8 与宿主本身限制，只能在 Win10/11 上运行，这与插件代码无关。
 
 ### 2. 加载插件
 
@@ -558,6 +586,7 @@ PL 线是单区域绘制，「多对一」会被自动取消；「仅绘云线�
 
 - COPY 会复制批注 UUID，尚未自动重新编号
 - 暂不提供 Excel 导出和图片批注
-- **AutoCAD 2012~2014 目标（`net40`）需要 AutoCAD 2012 的 `acdbmgd.dll` / `acmgd.dll` 才能编译**：这两条 API 不在 NuGet 上（`AutoCAD.NET` 包最老只到 20.0.0 = AutoCAD 2015）。安装 AutoCAD 2012 后直接 `build.cmd 2012` 即可，也可只把那两个 DLL 拷到任意目录再用 `-p:Acad2012Dir="该目录"` 指定
-- 该目标需要宿主目录放一份 `System.ValueTuple.dll`（`AnnotationService` 用了命名元组返回值），`build.cmd release` 会自动带上
-- 目标机若是 AutoCAD 2013/2014 **且只装了 .NET 4.0**，也需要用 `net40` 产物；装了 .NET 4.5 及以上则可直接用 `net45` 产物
+- **AutoCAD 2012 目标（`net40`）需要 AutoCAD 2012 的 `acdbmgd.dll` / `acmgd.dll` 才能编译**：这两条 API 不在 NuGet 上（`AutoCAD.NET` 包最老只到 20.0.0 = AutoCAD 2015）。安装 AutoCAD 2012 后直接 `build.cmd 2012` 即可，也可只把那两个 DLL 拷到任意目录再用 `-p:Acad2012Dir="该目录"` 指定
+- **AutoCAD 2013~2024 目标（`net40`）需要本机有 2013~2024 任一版本的 `acdbmgd/acmgd/accoremgd`**（默认取 `C:\Program Files\Autodesk\AutoCAD 2014`，可用 `-p:AcadApiDir=` 指定）。只装了 2015+ 而没有任何 2013/2014 的机器也能编 —— 2022 等版本的这三个 DLL 同样可用
+- 两个 `net40` 目标都需要宿主目录放一份 `System.ValueTuple.dll`（`AnnotationService` 用了命名元组返回值），`build.cmd release` 会自动带上。**不同产物目录里的 `System.ValueTuple.dll` 不是同一个文件，必须用各自目录里那份**
+- **Win7 用户请用 `net40` 产物**：只装了 .NET 4.0 的 Win7 加载 `net45` 产物会失败（Win10/11 自带 4.6+，会掩盖这个问题）；`net8` 两份受 .NET 8 与宿主本身限制，只能在 Win10 1607+ 运行

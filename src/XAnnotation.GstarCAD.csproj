@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 浩辰 GstarCAD 2026（.NET 8）构建：与 AutoCAD 2025~2027 同为 net8，仅宿主程序集不同。
+       浩辰的托管 API 是 AutoCAD 托管 API 的同形克隆，命名空间为 Gssoft.Gscad.*，
+       COM 应用对象属性名沿用 AcadApplication（不是中望的 ZcadApplication）。
+       换机器/换版本时用命令行覆盖：
+         dotnet build src\XAnnotation.GstarCAD.csproj -c Release -p:GscadDir="D:\path\to\GstarCAD2026" -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>$(RepoRoot)bin-gscad\</OutputPath>
+    <OutputType>Library</OutputType>
+    <RootNamespace>XAnnotation</RootNamespace>
+    <AssemblyName>XAnnotation.GstarCAD</AssemblyName>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <UseWPF>true</UseWPF>
+    <DefineConstants>GSCAD</DefineConstants>
+    <!-- 浩辰 GstarCAD 2026 的托管 API 在其安装目录根下（Gc*.dll）。 -->
+    <GscadDir Condition="'$(GscadDir)' == ''">C:\Program Files\浩辰软件\浩辰CAD2026</GscadDir>
+    <!-- CAD 通过 NETLOAD 加载类库时不会执行 dotnet publish；构建目录必须直接带齐运行依赖。 -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <!-- 插件只运行于 Windows 上的 CAD 宿主，注册表 CA1416 平台告警无需提示。 -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 浩辰 .NET API 引用（仅编译期，运行时使用 CAD 宿主自带程序集） -->
+    <Reference Include="GcCoreMgd"><HintPath>$(GscadDir)\GcCoreMgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GcDbMgd"><HintPath>$(GscadDir)\GcDbMgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GcMgd"><HintPath>$(GscadDir)\GcMgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="GcWindows"><HintPath>$(GscadDir)\GcWindows.dll</HintPath><Private>false</Private></Reference>
+    <!-- net8 下 Bitmap/GDI 截图（X_PZ_WORD 导出用）所需的 System.Drawing.Common -->
+    <PackageReference Include="System.Drawing.Common" Version="8.0.10" />
+  </ItemGroup>
+</Project>

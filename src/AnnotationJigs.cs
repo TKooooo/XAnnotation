@@ -9,6 +9,15 @@ using ZwSoft.ZwCAD.EditorInput;
 using ZwSoft.ZwCAD.Geometry;
 using ZwSoft.ZwCAD.GraphicsInterface;
 using CadPolyline = ZwSoft.ZwCAD.DatabaseServices.Polyline;
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+using Gssoft.Gscad.ApplicationServices;
+using Gssoft.Gscad.Colors;
+using Gssoft.Gscad.DatabaseServices;
+using Gssoft.Gscad.EditorInput;
+using Gssoft.Gscad.Geometry;
+using Gssoft.Gscad.GraphicsInterface;
+using CadPolyline = Gssoft.Gscad.DatabaseServices.Polyline;
 #else
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Colors;

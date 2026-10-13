@@ -2,6 +2,9 @@
 using System.Runtime.InteropServices;
 #if ZWCAD
 using ZwSoft.ZwCAD.Runtime;
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+using Gssoft.Gscad.Runtime;
 #else
 using Autodesk.AutoCAD.Runtime;
 #endif

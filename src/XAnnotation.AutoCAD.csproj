@@ -1,29 +1,57 @@
 <Project Sdk="Microsoft.NET.Sdk.WindowsDesktop" ToolsVersion="Current">
+  <!--
+    AutoCAD 2013 ~ 2024 合并构建（.NET 4.0 + AnyCPU + 直接引用本机 AutoCAD 的托管程序集）。
+
+    为什么是 net40（而不是 net45）—— Win7 支持的根因：
+      1) 官方对照表（Autodesk「关于 Managed .NET 的兼容性」）写明
+         AutoCAD 2012/2013/2014 支持的 .NET Framework 是 **4.0**，2015 起才升到 4.5。
+         2013/2014 全新安装带的是 .NET 4.0；只装了 4.0 的机器（Win7 上很常见）
+         加载 net45 产物会失败 —— 典型现场就是"Win10 上正常、Win7 上加载后没反应"
+         （Win10 自带 .NET 4.6+，恰好掩盖了这个问题）。钉 net40 才能覆盖 4.0。
+      2) 2013/2014 跑 .NET 4.0、2015~2024 跑 4.5+，但两者是**同一个 CLR 4.0.30319**，
+         net40 产物能被 4.5+ 直接加载 —— 所以一个 net40 DLL 可以通吃 2013~2024。
+
+    为什么能只出一个 DLL（三条硬依据，改这个目标前别只当"应该能行"）：
+      1) 必须钉 net40（理由同上）。
+      2) AutoCAD 托管程序集是**未签名**的（实测 Acdbmgd 19.1.0.0, PublicKeyToken=null）：
+         CLR 对未签名程序集**只按简单名**在进程已加载程序集里查找，**版本号不参与匹配**，
+         所以对着 19.1 编的插件能装到 2015(20.x)~2024(24.x)。
+      3) 必须 AnyCPU（实测 CorFlags=ILONLY、32BITREQUIRED=false）：
+         2013/2014 有大量 32 位安装，改成 x64 会让它们拒绝加载。
+
+    与其它目标共用全部源码，差异只靠编译符号表达：
+      AUTOCAD             —— 宿主是 AutoCAD（非 ZWCAD / 非浩辰）
+      WPF_NO_PIXELSPERDIP —— net40 的 FormattedText 还没有 pixelsPerDip 重载（4.6.2 才加入）
+    这里**不能**定义 ACAD_PRE2013（2013 起 Editor 已在 accoremgd）也不能定义 ACAD_CORE
+    （那个符号是给 AutoCAD 2025+ 的 Core 分支用的），走的是源码里的 19.x 分支。
+
+    换机器编译时用命令行覆盖 API 目录（2013~2024 任一本机安装都行，只要有
+    acdbmgd.dll / acmgd.dll / accoremgd.dll 三个文件，不要求完整安装）：
+        dotnet build src\XAnnotation.AutoCAD.csproj -c Release -p:AcadApiDir="D:\AutoCAD 2022"
+  -->
   <PropertyGroup>
-    <TargetFramework>net45</TargetFramework>
+    <TargetFramework>net40</TargetFramework>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>$(RepoRoot)bin-acad\</OutputPath>
+    <OutputPath>$(RepoRoot)bin-acad2013-2024\</OutputPath>
     <OutputType>Library</OutputType>
     <RootNamespace>XAnnotation</RootNamespace>
     <AssemblyName>XAnnotation.AutoCAD</AssemblyName>
-    <PlatformTarget>x64</PlatformTarget>
+    <PlatformTarget>AnyCPU</PlatformTarget>
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <UseWPF>true</UseWPF>
-    <!-- WPF_NO_PIXELSPERDIP：net45 的 FormattedText 没有 pixelsPerDip 重载（4.6.2 才加入），
-         它的第 7 个参数是 NumberSubstitution —— 传数字会直接编译失败 CS1503。
-         源码用这个符号切到 6 参构造，见 ToolbarInstaller.cs 的图标绘制。
-         注意不能拿 AUTOCAD 当判据：AutoCAD2025 的 net8 工程同样定义 AUTOCAD，要的是带像素密度的重载。 -->
     <DefineConstants>AUTOCAD;WPF_NO_PIXELSPERDIP</DefineConstants>
+    <AcadApiDir Condition="'$(AcadApiDir)' == ''">C:\Program Files\Autodesk\AutoCAD 2014</AcadApiDir>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="AutoCAD.NET" Version="20.0.0">
-      <ExcludeAssets>runtime</ExcludeAssets>
-    </PackageReference>
+    <!-- Private=false：运行时用 CAD 宿主自带的同名程序集，不要把这三个 DLL 拷进产物目录（会与宿主冲突）。 -->
+    <Reference Include="acdbmgd"><HintPath>$(AcadApiDir)\acdbmgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="acmgd"><HintPath>$(AcadApiDir)\acmgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="accoremgd"><HintPath>$(AcadApiDir)\accoremgd.dll</HintPath><Private>false</Private></Reference>
+    <!-- System.ValueTuple：AnnotationService.UcsAlignedExtents 用了命名元组返回值，net40 上没有该类型。
+         注意运行时把 System.ValueTuple.dll 与主 DLL 放在同一目录。 -->
     <PackageReference Include="System.ValueTuple" Version="4.5.0" />
-    <!-- 只装 .NET SDK（未装 Visual Studio）的机器上没有 .NET Framework 4.5 参考程序集，
-         直接 dotnet build 会报 MSB3644「找不到参考程序集」。
-         引入官方参考程序集包后无需 targeting pack 即可编译，PrivateAssets=all 保证不影响产物。 -->
+    <!-- 只装 .NET SDK（未装 Visual Studio）的机器上没有 net40 参考程序集，靠这个包补齐，避免 MSB3644。 -->
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <Reference Include="System.Xml.Linq" />
     <Reference Include="Microsoft.CSharp" />
@@ -33,4 +61,11 @@
     <Reference Include="WindowsBase" />
     <Reference Include="System.Xaml" />
   </ItemGroup>
+
+  <!-- 缺 DLL 时给出人话提示，而不是抛一堆 CS0246 / MSB3243。
+       Error 是 Task 不是 Item，必须放在 Target 里。 -->
+  <Target Name="EnsureAcadApiAssemblies" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(AcadApiDir)\acdbmgd.dll') Or !Exists('$(AcadApiDir)\acmgd.dll') Or !Exists('$(AcadApiDir)\accoremgd.dll')"
+           Text="未找到 AutoCAD 2013~2024 的托管程序集（acdbmgd.dll / acmgd.dll / accoremgd.dll）。请安装其中任一版本，或把这三个 DLL 拷到任意目录后用 -p:AcadApiDir=&quot;该目录&quot; 指定。当前 AcadApiDir=$(AcadApiDir)" />
+  </Target>
 </Project>

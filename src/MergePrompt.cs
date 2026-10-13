@@ -3,6 +3,9 @@ using System.Linq;
 using System.Windows;
 #if ZWCAD
 using CadApplication = ZwSoft.ZwCAD.ApplicationServices.Core.Application;
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+using CadApplication = Gssoft.Gscad.ApplicationServices.Core.Application;
 #else
 #if ACAD_PRE2013
 // AutoCAD 2012 及更早：还没有 AcCoreMgd 拆分，只有 ApplicationServices.Application 一个入口。

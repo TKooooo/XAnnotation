@@ -8,6 +8,10 @@ using System.Windows.Media.Imaging;
 #if ZWCAD
 using UiApplication = ZwSoft.ZwCAD.ApplicationServices.Application;
 using CadApplication = ZwSoft.ZwCAD.ApplicationServices.Core.Application;
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+using UiApplication = Gssoft.Gscad.ApplicationServices.Application;
+using CadApplication = Gssoft.Gscad.ApplicationServices.Core.Application;
 #elif ACAD_CORE
 using UiApplication = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 using CadApplication = Autodesk.AutoCAD.ApplicationServices.Core.Application;
@@ -165,6 +169,10 @@ namespace XAnnotation
             if (menuGroups == null) return null;
 #if ZWCAD
             var group = menuGroups.InvokeMethod("Item", 0);
+#elif GSCAD
+            // 浩辰与中望同处理：菜单组按下标 0 取（按名取会抛 TargetInvocationException），
+            // 第 0 项即主菜单组（其 CUI 里 <MenuGroup Name="GCAD">）。
+            var group = menuGroups.InvokeMethod("Item", 0);
 #else
             var group = menuGroups.InvokeMethod("Item", "Acad");
 #endif
@@ -248,6 +256,9 @@ namespace XAnnotation
         {
 #if ZWCAD
             try { return UiApplication.ZcadApplication; } catch { return null; }
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+            try { return UiApplication.AcadApplication; } catch { return null; }
 #else
             var applicationTypeNames = new[]
             {

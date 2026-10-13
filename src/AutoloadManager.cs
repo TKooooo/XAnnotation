@@ -7,6 +7,9 @@ using Microsoft.Win32;
 using WinRegistry = Microsoft.Win32.Registry;
 #if ZWCAD
 using ZwSoft.ZwCAD.DatabaseServices;
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+using Gssoft.Gscad.DatabaseServices;
 #else
 using Autodesk.AutoCAD.DatabaseServices;
 #endif

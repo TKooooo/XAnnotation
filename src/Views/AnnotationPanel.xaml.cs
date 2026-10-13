@@ -13,6 +13,13 @@ using ZwSoft.ZwCAD.DatabaseServices;
 using ZwSoft.ZwCAD.EditorInput;
 using ZwSoft.ZwCAD.Geometry;
 using CadApplication = ZwSoft.ZwCAD.ApplicationServices.Core.Application;
+#elif GSCAD
+// 浩辰 GstarCAD：API 与中望同形，命名空间为 Gssoft.Gscad.*；COM 应用对象属性名是 AcadApplication（非 ZcadApplication）。
+using Gssoft.Gscad.ApplicationServices;
+using Gssoft.Gscad.DatabaseServices;
+using Gssoft.Gscad.EditorInput;
+using Gssoft.Gscad.Geometry;
+using CadApplication = Gssoft.Gscad.ApplicationServices.Core.Application;
 #else
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
@@ -388,6 +395,12 @@ namespace XAnnotation.Views
 #if ZWCAD
         // ZWCAD 宿主不挂"光标进图纸"的监听：宁可少一个入口，也不引入未经验证的宿主 API。
         // 那边靠「点图纸 / 回车 / 点外形按钮」三个入口启动，功能完整。
+        private void HookPointMonitor() { }
+        private void UnhookPointMonitor() { }
+        private void RehookPointMonitor() { }
+#elif GSCAD
+        // 浩辰与中望同处理：不挂"光标进图纸"的监听——宁可少一个入口，也不引入未经验证的宿主 API。
+        // 靠「点图纸 / 回车 / 点外形按钮」三个入口启动，功能完整。
         private void HookPointMonitor() { }
         private void UnhookPointMonitor() { }
         private void RehookPointMonitor() { }
