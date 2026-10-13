@@ -93,6 +93,40 @@ namespace XAnnotation
             }
         }
 
+        /// <summary>本插件当前活着的漂浮窗口（登记表 ∪ <c>Application.Current.Windows</c>，已去重）。
+        /// <para>给"光标 / 前台窗口是不是落在我们自己的窗口上"这类判断用（见
+        /// <c>AnnotationPanel.IsCursorOverOwnWindow</c> / <c>IsForegroundUsableForHoverStart</c>）：
+        /// 宿主里 <c>Application.Current</c> 不一定存在（CAD 不是 WPF 应用），只靠它会把我们自己的
+        /// 窗口误判成"CAD 主窗口"，于是鼠标划过批注设置/批注列表就可能擅自开始一轮。</para></summary>
+        public static List<Window> GetFloatingWindows()
+        {
+            var result = new List<Window>();
+            try
+            {
+                PurgeFloating();
+                foreach (var reference in FloatingWindows)
+                {
+                    if (reference.Target is Window registered && !result.Contains(registered)) result.Add(registered);
+                }
+            }
+            catch (Exception ex) { PluginLog.Warning("WPF.GetFloatingWindows.registry", ex.Message); }
+
+            try
+            {
+                var app = System.Windows.Application.Current;
+                if (app != null)
+                {
+                    foreach (Window w in app.Windows)
+                    {
+                        if (w != null && !result.Contains(w)) result.Add(w);
+                    }
+                }
+            }
+            catch (Exception ex) { PluginLog.Warning("WPF.GetFloatingWindows.application", ex.Message); }
+
+            return result;
+        }
+
         /// <summary>把本插件其它<b>置顶</b>窗口临时降为普通窗口（跳过一个：即将显示的模态窗口本身）。
         /// 只动 <c>Topmost</c>，不动可见性 / 焦点，模态结束后由 <see cref="RestoreTopmost"/> 原样恢复。</summary>
         private static List<Window> LowerTopmostWindows(Window except)

@@ -139,6 +139,11 @@ namespace XAnnotation.Views
         // （浩辰约 1 s），那次失活被宽限期挡掉之后，用户再点图纸就什么事件都没有了，
         // "回图纸即开始"这条路彻底死掉，只能去点外形按钮（用户反馈"必须要手动选一次外形才能批注"）。
         // 轮询不看宿主事件，四个宿主行为一致。
+        //
+        // 第四轮（浩辰）追加：轮询的"前台"判据不能只认 CAD 主窗口 —— 光标移到图纸上不会改变前台窗口，
+        // 于是"面板还持有焦点"的那段时间里判据恒假。改成"CAD 主窗口 或 本面板"，
+        // 同时在真正发送 X_PZ_RUN 之前用 SetForegroundWindow 把前台交还 CAD（见 EnsureCadWindowActive）：
+        // 浩辰实测首发被丢、点一下图纸之后就正常，差别就在这一处。
 
         /// <summary>空闲轮询计时器（仅面板待命时有效）。优先级必须 Normal：Background 会被 CAD 主循环饿死。</summary>
         private readonly DispatcherTimer _idleWatch;
@@ -148,8 +153,8 @@ namespace XAnnotation.Views
         /// 移到图纸上了，怎么还不开始"里，是启动延迟里最容易被感知的一环。</para></summary>
         private const int IdleWatchIntervalMs = 120;
 
-        /// <summary>光标连续满足"不在面板上、且落在 CAD 窗口里"这么多次（× <see cref="IdleWatchIntervalMs"/>）
-        /// 才算用户要开始画。
+        /// <summary>光标连续满足"不在我们自己任何窗口上、落在 CAD 主窗口里、且前台可用"这么多次
+        /// （× <see cref="IdleWatchIntervalMs"/>）才算用户要开始画。
         /// <para>2026-10-13 由 3 收到 2：原值（600 ms）让"打开面板 → 移鼠标到图纸"这条最自然的路径
         /// 慢到用户以为没反应 —— 实测用户会在这段空档里回去点一次外形按钮（反馈里的
         /// "都需要手动选择一次矩形批注才能批注"）。2 × 120 = 240 ms 足够滤掉面板刚 Show 出来时的抖动。</para></summary>
@@ -159,7 +164,7 @@ namespace XAnnotation.Views
         // 它当初是为了把"宿主把焦点抢回去（用户没碰鼠标）"和"用户真去图纸"分开，但代价是把
         // 最自然的那条路径也卡住了一拍：光标位置采样要等下一拍才有上一拍可比，白送一个轮询周期。
         // 而现在这种误判已经被两道更直接的判据挡住了：
-        //   ① IsCursorOverPanel()：光标还在面板矩形里就一律不算"离开面板"；
+        //   ① IsCursorOverOwnWindow()：光标还在我们自己的窗口（面板/设置/列表…）矩形里就一律不算离开；
         //   ② IdleWatchDwellTicks 连续 2 拍确认（240 ms），面板刚 Show 出来的抖动过不去。
 
         /// <summary>"光标在图纸上"已经连续满足了几次轮询。</summary>
@@ -209,6 +214,12 @@ namespace XAnnotation.Views
         /// <para>只重发、不重复执行：<c>X_PZ_RUN</c> 一进命令上下文就会 <see cref="ResetPendingStart"/>，
         /// 所以 <c>_startPending</c> 一旦被清就说明那一条已被消费，看门狗不会再动手。</para></summary>
         private const int MaxRunRetry = 4;
+
+        /// <summary>第一次重发之后，看门狗改用这个间隔（毫秒）。
+        /// <para>首发被宿主丢弃后的"补救"要尽量快：浩辰 2026 实测<b>首发必丢</b>，<see cref="RunWatchdogMs"/>
+        /// 那 400 ms 全是白等的；改成 150 ms 之后，用户感知的等待从 ~2.5 s 掉到 ~0.6 s。
+        /// 第一次仍用 <see cref="RunWatchdogMs"/>（要给宿主留出正常的命令队列处理时间，别误判成"丢了"）。</para></summary>
+        private const int RunRetryIntervalMs = 150;
 
         /// <summary>本轮启动已经重发过几次（每次排队归零）。</summary>
         private int _runRetry;
@@ -462,15 +473,24 @@ namespace XAnnotation.Views
             _idleDwellTicks = 0;
         }
 
-        /// <summary>空闲轮询：面板待命时，只要"光标已不在面板上、落在 CAD 窗口里、CAD 是前台窗口"
-        /// 连续满足几次，就按当前外形与选项开始一轮。
+        /// <summary>空闲轮询：面板待命时，只要"光标不在我们自己任何窗口上、落在 CAD 主窗口矩形里、
+        /// 且前台窗口可用（CAD 主窗口 或 本面板）"连续满足几次，就按当前外形与选项开始一轮。
         /// <para>与宿主事件无关，四个宿主（AutoCAD 2013-2024 / 2025+ / 中望 / 浩辰）行为一致。</para>
         /// <para><b>2026-10-13 第三轮反馈后的改动</b>：这里原本还要求"光标动过（位移 ≥ 3 px）"，
         /// 现在去掉了。去掉之后"打开面板 → 把鼠标移向图纸"就<b>直接开始</b>，
         /// 用户不需要在面板上点任何按钮 —— 这正是反馈里要的
-        /// "进入之后不需要做任何选择就能矩形批注"。误判风险由两道判据兜着：
-        /// 光标仍在面板矩形内一律不算离开（宿主抢焦点时鼠标通常还压在面板上），
-        /// 以及连续 <see cref="IdleWatchDwellTicks"/> 拍确认（240 ms）。</para></summary>
+        /// "进入之后不做任何选择就能矩形批注"。</para>
+        /// <para><b>2026-10-13 第四轮反馈后的改动</b>（浩辰："进面板后不会立即进入矩形批注，
+        /// 点一下图纸或点一次外形才行"）：
+        /// <list type="number">
+        /// <item>前台判据由"必须是 CAD 主窗口"放宽成"CAD 主窗口<b>或本面板</b>" ——
+        /// 光标移到图纸上并不会改变前台窗口（要点击才会），只认主窗口时，
+        /// 宿主还没把焦点抢回去的那 1~2 s 里轮询永远不通过。</item>
+        /// <item>光标判据由"不在面板上"收紧成"不在我们自己<b>任何</b>窗口上"
+        /// （<see cref="IsCursorOverOwnWindow"/>），补上放宽 ①带来的误判面。</item>
+        /// <item>每次被挡下都记一行 <c>[AnnotationPanel.IdleDiag]</c>（<see cref="LogIdleBlocked"/>，同一原因每秒一行），
+        /// 免得下一次又只能靠猜。</item>
+        /// </list></para></summary>
         private void OnIdleWatchTick(object sender, EventArgs e)
         {
             try
@@ -488,11 +508,33 @@ namespace XAnnotation.Views
                 // 被清成 MinValue，含义是"用户还没重新表示要画"。这时按住轮询，直到他回到面板
                 // （Activated / MouseLeave 会重新盖章）——否则取消一轮之后光标还停在图纸上，
                 // 下一拍就会自己又开一轮，用户按 Esc 等于没按。
-                if (_panelLeaveUtc == DateTime.MinValue) { _idleDwellTicks = 0; return; }
+                if (_panelLeaveUtc == DateTime.MinValue)
+                {
+                    _idleDwellTicks = 0;
+                    LogIdleBlocked("放行闸门关闭（上一轮已结束、用户还没重新回到面板）");
+                    return;
+                }
 
-                if (IsCursorOverPanel()) { _idleDwellTicks = 0; return; }
-                if (!IsCursorOverCadWindow()) { _idleDwellTicks = 0; return; }
-                if (!IsCadMainWindowForeground()) { _idleDwellTicks = 0; return; }
+                if (IsCursorOverOwnWindow())
+                {
+                    _idleDwellTicks = 0;
+                    LogIdleBlocked("光标压在我们自己的窗口上（面板/设置/列表…）");
+                    return;
+                }
+
+                if (!IsCursorOverCadWindow())
+                {
+                    _idleDwellTicks = 0;
+                    LogIdleBlocked("光标不在 CAD 主窗口矩形内");
+                    return;
+                }
+
+                if (!IsForegroundUsableForHoverStart())
+                {
+                    _idleDwellTicks = 0;
+                    LogIdleBlocked("前台既不是 CAD 主窗口、也不是本面板");
+                    return;
+                }
 
                 if (++_idleDwellTicks < IdleWatchDwellTicks) return;
                 _idleDwellTicks = 0;
@@ -614,22 +656,159 @@ namespace XAnnotation.Views
             return true;
         }
 
-        /// <summary>当前前景窗口是不是 <b>CAD 主窗口</b>。
-        /// <para>不能只判"同进程"：本插件自己的窗口（批注设置、批注列表…）也跑在 CAD 进程里，
-        /// 点开「批注设置…」会让面板失活，只判进程就会擅自启动一轮批注。</para></summary>
-        private static bool IsCadMainWindowForeground()
+        /// <summary>空闲轮询用：当前前台窗口是否可以认为"用户正要去图纸上画图"。
+        /// <para><b>①</b> CAD 主窗口在前台（用户已经点过图纸）；<b>②</b> <b>本面板自己</b>在前台。
+        /// <para>为什么必须接受 ②：用户把光标从面板移到图纸上时<b>不会改变前台窗口</b>（要点击才会），
+        /// 所以只认 ① 的话，在"宿主还没把焦点抢回去"的那段时间里轮询永远不通过，
+        /// 用户看到的就是"进面板后毫无反应，非得先点一下图纸/点一次外形才行"——
+        /// 这正是 2026-10-13 第四轮反馈的浩辰现象（外部实测：浩辰主窗口句柄非零且正确，
+        /// 所以这里走的是严格相等、不是"同进程"兜底，面板一持有焦点就必然为假）。</para>
+        /// <para>仍<b>不</b>接受其它插件窗口（批注设置 / 批注列表 / 快捷过滤…）在前台：那是"用户在配置
+        /// 或在翻列表"，不是要画图。配合 <see cref="SettingsWindow.IsOpen"/> 与
+        /// <see cref="IsCursorOverOwnWindow"/>，误判面被压到最小。</para></summary>
+        private bool IsForegroundUsableForHoverStart()
         {
-            var hwnd = GetForegroundWindow();
-            if (hwnd == IntPtr.Zero) return false;
+            try
+            {
+                var hwnd = GetForegroundWindow();
+                if (hwnd == IntPtr.Zero) return false;
 
-            var main = GetCadMainWindowHandle();
-            if (main != IntPtr.Zero) return hwnd == main;
+                var main = GetCadMainWindowHandle();
+                if (main != IntPtr.Zero && hwnd == main) return true;
 
-            // 拿不到主窗口句柄时退回"同进程"判定，并排除掉我们自己开的 WPF 窗口。
-            uint pid;
-            GetWindowThreadProcessId(hwnd, out pid);
-            if (pid != (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return false;
-            return !IsOurOwnWindow(hwnd);
+                // 面板自己是前台：用户正把光标往图纸上移（面板仍持有焦点，宿主还没抢回去）。
+                if (new System.Windows.Interop.WindowInteropHelper(this).Handle == hwnd) return true;
+
+                if (main != IntPtr.Zero) return false;
+
+                // 拿不到主窗口句柄时退回"同进程"判定，并排除掉我们自己开的 WPF 窗口。
+                uint pid;
+                GetWindowThreadProcessId(hwnd, out pid);
+                if (pid != (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return false;
+                return !IsOurOwnWindow(hwnd);
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("AnnotationPanel.IsForegroundUsable", ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>启动一轮之前，把前台交给 CAD 主窗口。
+        /// <para><b>为什么必要</b>：<c>SendStringToExecute</c> 在浩辰 2026 上会被静默丢弃——实机日志里
+        /// 排完队 0.4 s 都没有 <c>[X_PZ_RUN] 命令上下文已进入。</c>，而<b>点一下图纸之后</b>的发送
+        /// 同秒就被消费。两者的差别就是"CAD 主窗口有没有持有前台"，所以发送前显式交还一次。</para>
+        /// <para>只在本进程已经持有前台时抢（跨进程抢焦点会被 Windows 拒绝，而且没必要）：
+        /// 调用方要么是面板自己（我们的进程），要么是 CAD 主窗口，两种情况都满足"本进程是前台进程"，
+        /// 因此 <c>SetForegroundWindow</c> 会被允许。失败只是记一行日志，绝不抛。</para></summary>
+        private static void EnsureCadWindowActive()
+        {
+            try
+            {
+                var main = GetCadMainWindowHandle();
+                if (main == IntPtr.Zero) return;
+                if (GetForegroundWindow() == main) return;
+
+                uint pid;
+                GetWindowThreadProcessId(GetForegroundWindow(), out pid);
+                if (pid != (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return;
+
+                var ok = SetForegroundWindow(main);
+                PluginLog.Info("AnnotationPanel.ActivateCad",
+                    "发送 X_PZ_RUN 前把前台交给 CAD 主窗口：" + (ok ? "成功" : "被系统拒绝") + "，hwnd=" + main + "。");
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("AnnotationPanel.ActivateCad", ex.Message);
+            }
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        /// <summary>光标此刻是否压在本插件自己的<b>任意</b>漂浮窗口上（面板、设置、列表、快捷过滤…）。
+        /// <para>比只看面板更严：设置/列表窗口浮在图纸上方，光标划过它们时"光标在 CAD 窗口矩形内、
+        /// 又不在面板上"这两条都可能成立，只判面板就会擅自开一轮。</para>
+        /// <para>窗口清单取自 <see cref="CadDialog.GetFloatingWindows"/>（登记表 ∪
+        /// <c>Application.Current.Windows</c>）：CAD 进程里 <c>Application.Current</c> 不一定存在，
+        /// 只靠它就漏判。取不到任何窗口时退回只看面板，不会把入口堵死。</para></summary>
+        private bool IsCursorOverOwnWindow()
+        {
+            if (IsCursorOverPanel()) return true;
+            try
+            {
+                if (!GetCursorPos(out var point)) return false;
+                foreach (var window in CadDialog.GetFloatingWindows())
+                {
+                    if (window == null) continue;
+                    var hwnd = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+                    if (hwnd == IntPtr.Zero) continue;
+                    if (!GetWindowRect(hwnd, out var rect)) continue;
+                    if (point.X >= rect.Left && point.X < rect.Right
+                        && point.Y >= rect.Top && point.Y < rect.Bottom) return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("AnnotationPanel.IsCursorOverOwnWindow", ex.Message);
+            }
+
+            return false;
+        }
+
+        // ═══════════ "自动启动为什么没发生"的留痕 ═══════════
+        //
+        // 2026-10-13 第四轮反馈："浩辰进面板后不会立即进入矩形批注，点一下图纸或点一次外形才行"。
+        // 这条链路上有 6 个静默 return，命令行日志里只能看到"什么都没发生"，没法知道卡在哪一步——
+        // 这个项目已经吃过一次"静默 return = 排查黑洞"的亏。所以每次被挡下都记一行，
+        // 同一原因每秒最多一行（轮询 120 ms 一拍，不限制会把日志刷爆）。
+
+        private string _idleBlockedLast;
+        private DateTime _idleBlockedSinceUtc = DateTime.MinValue;
+        private DateTime _idleBlockedLoggedUtc = DateTime.MinValue;
+
+        /// <summary>记一次"空闲轮询被挡下"及现场（前台窗口 / 主窗口 / 面板窗口 / 光标 / 两个矩形）。
+        /// <para>同一原因每秒最多一行；原因变化时立刻记一行（能看到状态交替）。</para></summary>
+        private void LogIdleBlocked(string reason)
+        {
+            try
+            {
+                var now = DateTime.UtcNow;
+                if (!string.Equals(reason, _idleBlockedLast, StringComparison.Ordinal))
+                {
+                    _idleBlockedLast = reason;
+                    _idleBlockedSinceUtc = now;
+                    _idleBlockedLoggedUtc = DateTime.MinValue;   // 原因变了：这一次一定要记下来
+                }
+
+                if ((now - _idleBlockedLoggedUtc).TotalMilliseconds < 1000) return;
+                _idleBlockedLoggedUtc = now;
+
+                var main = GetCadMainWindowHandle();
+                var foreground = GetForegroundWindow();
+                GetCursorPos(out var point);
+                var panel = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+
+                PluginLog.Info("AnnotationPanel.IdleDiag",
+                    "自动启动被挡下：" + reason
+                    + "（已持续 " + (now - _idleBlockedSinceUtc).TotalSeconds.ToString("0.#") + " s）"
+                    + " | fg=" + foreground + " main=" + main + " panel=" + panel
+                    + " 光标=" + point.X + "," + point.Y
+                    + " | 面板矩形=" + RectText(panel)
+                    + " CAD矩形=" + RectText(main));
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("AnnotationPanel.IdleDiag", ex.Message);
+            }
+        }
+
+        /// <summary>窗口矩形的紧凑文本，仅用于上面那行诊断日志。</summary>
+        private static string RectText(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return "(无)";
+            if (!GetWindowRect(hwnd, out var rect)) return "(取不到)";
+            return rect.Left + "," + rect.Top + "-" + rect.Right + "," + rect.Bottom;
         }
 
         /// <summary>CAD 主窗口句柄（即本进程的主窗口）。取不到时返回 <see cref="IntPtr.Zero"/>。</summary>
@@ -1324,7 +1503,11 @@ namespace XAnnotation.Views
         /// （用户反馈的"浩辰控制面板里的矩形、PL线、基点都画不出来"）。</para>
         /// <para>兜底入口 <c>Editor.Command(object[])</c> 是 acedCommand 的托管版，在当前线程同步进入命令上下文：
         /// 浩辰、中望、AutoCAD 2015+ 都有（AutoCAD 2013/2014 没有，所以只能反射调用，
-        /// 这也避免把 net4 目标绑死在 2024 才有的 API 上）。没有它时退回以 <c>\n</c> 结尾再发一次 —— 部分宿主只认换行作回车。</para></summary>
+        /// 这也避免把 net4 目标绑死在 2024 才有的 API 上）。没有它时退回以 <c>\n</c> 结尾再发一次 —— 部分宿主只认换行作回车。</para>
+        /// <para><b>2026-10-13 第四轮（浩辰）</b>：重发前先 <see cref="EnsureCadWindowActive"/> 把前台交还 CAD 主窗口；
+        /// 第二拍起用 <see cref="RunRetryIntervalMs"/>（150 ms）而不是 <see cref="RunWatchdogMs"/>（400 ms）——
+        /// 浩辰上"首发必丢"是常态，没必要每拍都等满 400 ms。注意一次重发最多带来一条被延迟消费的命令，
+        /// 而 <c>X_PZ_RUN</c> 会检查 <c>_startPending</c>，重复的那条会被忽略（见 <see cref="RunQueuedAnnotation"/>）。</para></summary>
         private void OnRunWatchdogTick(object sender, EventArgs e)
         {
             _runWatchdog.Stop();
@@ -1367,9 +1550,14 @@ namespace XAnnotation.Views
                     return;
                 }
 
+                // 重发前同样把前台交还 CAD 主窗口：首发被丢的宿主（浩辰 2026）通常就是栽在这里。
+                EnsureCadWindowActive();
+
                 doc.SendStringToExecute("X_PZ_RUN\n", true, false, false);
                 _pendingSinceUtc = DateTime.UtcNow;
                 // 继续盯：宿主如果还是不消费，下一拍再发一次（最多 MaxRunRetry 次）。
+                // 这一拍之后改用更短的间隔：首发被丢已经确认，没必要每拍都等满 RunWatchdogMs。
+                _runWatchdog.Interval = TimeSpan.FromMilliseconds(RunRetryIntervalMs);
                 _runWatchdog.Start();
             }
             catch (Exception ex)
@@ -1484,6 +1672,10 @@ namespace XAnnotation.Views
                 _startPending = true;
                 _pendingSinceUtc = DateTime.UtcNow;
                 _runRetry = 0;
+                // ★ 发送前先把前台交还 CAD 主窗口（见 EnsureCadWindowActive）：
+                //   浩辰 2026 实测——面板还持有前台时首发必被静默丢弃，而点过图纸（前台＝CAD 主窗口）
+                //   之后的发送同秒就被消费。这一步就是为了补上"用户没点那一下"的差别。
+                EnsureCadWindowActive();
                 // ★ 以换行结尾，不用尾随空格。
                 //   2026-10-13 的实机日志把这条钉死了：排队的写法是 "X_PZ_RUN "（尾随空格），
                 //   看门狗 0.6 s 后判定"未被宿主执行"；兜底改成 "X_PZ_RUN\n" 的那一次，
@@ -1495,7 +1687,9 @@ namespace XAnnotation.Views
                 PluginLog.Info("AnnotationPanel.Queue",
                     "已把 X_PZ_RUN 排入命令队列（外形=" + shape + " 单区域=" + isSingle + "）。");
                 // 布好看门狗：宿主没执行这条命令就换一条入口再试（见 OnRunWatchdogTick）。
+                // 每轮排队都把间隔复位成 RunWatchdogMs —— 上一轮的重发可能把它改短过（见 OnRunWatchdogTick）。
                 _runWatchdog.Stop();
+                _runWatchdog.Interval = TimeSpan.FromMilliseconds(RunWatchdogMs);
                 _runWatchdog.Start();
             }
             catch (Exception ex)
