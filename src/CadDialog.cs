@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 #if ZWCAD
@@ -36,6 +37,9 @@ namespace XAnnotation
             // 挂主窗口失败不应阻断弹窗：仅记日志，继续走后续流程（窗口会退回居中屏幕显示）。
             try { AttachToCadMainWindow(window); }
             catch (Exception ex) { PluginLog.Error("WPF.AttachToCadMainWindow", ex); }
+            // 自己声明了"居中于屏幕"的窗口（批注内容窗、格式刷窗），由我们再摆一次：
+            // 光靠 XAML 的 CenterScreen 落点不可靠，见 CenterOnMonitor 的说明。
+            if (window.WindowStartupLocation == WindowStartupLocation.CenterScreen) CenterOnMonitor(window);
             window.Loaded += BringToForeground;
             // 模态窗口弹出前先把其它置顶漂浮窗口（批注面板 / 批注设置…）降下来：
             // 我们的漂浮窗口都是 Topmost（要压在 CAD 之上），而两个 Topmost 窗口谁也不能盖住谁 ——
@@ -254,6 +258,89 @@ namespace XAnnotation
             if(location==WindowStartupLocation.Manual||location==WindowStartupLocation.CenterScreen)return;
             window.WindowStartupLocation=handle!=IntPtr.Zero?WindowStartupLocation.CenterOwner:WindowStartupLocation.CenterScreen;
         }
+
+        #region 居中到显示器
+
+        private const uint MonitorDefaultToNearest = 2;
+        private const uint SwpNoSize = 0x0001;
+        private const uint SwpNoZOrder = 0x0004;
+        private const uint SwpNoActivate = 0x0010;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect { public int Left; public int Top; public int Right; public int Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeMonitorInfo
+        {
+            public int cbSize;
+            public NativeRect rcMonitor;
+            public NativeRect rcWork;
+            public uint dwFlags;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetMonitorInfo(IntPtr monitor, ref NativeMonitorInfo info);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+
+        /// <summary>把窗口摆到 CAD 所在显示器的中间（工作区内，避开任务栏）。
+        /// <para><b>为什么不能只靠 XAML 的 <c>WindowStartupLocation="CenterScreen"</c>：</b>
+        /// WPF 是在建窗阶段算位置的，那时窗口还没量出真实大小；我们又给窗口挂了一个宿主 HWND 作 Owner、
+        /// 模态还可能被 CAD 的 <c>ShowModalWindow</c> 再包一层，最终落点经常偏出屏幕中心
+        /// （批注内容窗的实测表现就是"没在显示器居中"）。</para>
+        /// <para>做法：等 Loaded（布局完成、首帧渲染之前）拿窗口真实外框，按显示器<b>物理像素</b>工作区算中点，
+        /// 再用 <c>SetWindowPos</c> 直接挪过去。全程物理像素，不掺 DIP/DPI 换算，多屏 + 不同缩放比例都不会算歪；
+        /// 目标显示器取 <b>CAD 主窗口</b>所在那块（用户眼睛在那儿），取不到才退回窗口自己所在的显示器。</para></summary>
+        public static void CenterOnMonitor(Window window)
+        {
+            if (window == null) return;
+            window.Loaded += (s, e) =>
+            {
+                try { CenterNow(window); }
+                catch (Exception ex) { PluginLog.Warning("WPF.CenterOnMonitor", ex.Message); }
+            };
+        }
+
+        private static void CenterNow(Window window)
+        {
+            var hwnd = new WindowInteropHelper(window).Handle;
+            if (hwnd == IntPtr.Zero) return;
+
+            var monitor = MonitorFromWindow(GetCadMainWindowHandle(), MonitorDefaultToNearest);
+            if (monitor == IntPtr.Zero) monitor = MonitorFromWindow(hwnd, MonitorDefaultToNearest);
+            if (monitor == IntPtr.Zero) return;
+
+            var info = new NativeMonitorInfo { cbSize = Marshal.SizeOf(typeof(NativeMonitorInfo)) };
+            if (!GetMonitorInfo(monitor, ref info)) return;
+
+            NativeRect current;
+            if (!GetWindowRect(hwnd, out current)) return;
+            var width = current.Right - current.Left;
+            var height = current.Bottom - current.Top;
+            if (width <= 0 || height <= 0) return;
+
+            var work = info.rcWork;
+            var x = work.Left + ((work.Right - work.Left) - width) / 2;
+            var y = work.Top + ((work.Bottom - work.Top) - height) / 2;
+            if (x == current.Left && y == current.Top) return;
+
+            if (!SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate))
+            {
+                PluginLog.Warning("WPF.CenterOnMonitor", "SetWindowPos 失败，窗口位置保持原样。");
+                return;
+            }
+            PluginLog.Info("WPF.CenterOnMonitor",
+                $"{window.GetType().Name} 从 ({current.Left},{current.Top}) 移到 ({x},{y})，工作区 {work.Left},{work.Top}-{work.Right},{work.Bottom}，窗口 {width}x{height}");
+        }
+
+        #endregion
 
         private static IntPtr GetCadMainWindowHandle()
         {

@@ -3,7 +3,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="关于 X-批注"
-        Width="370" Height="330"
+        Width="370" SizeToContent="Height"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
         WindowStyle="ToolWindow"
@@ -11,6 +11,24 @@
         Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}"
         FontFamily="Microsoft YaHei, 微软雅黑"
         FontSize="12">
+    <Window.Resources>
+        <!-- 可复制的静态文字：TextBlock 不能选中文本，这里用「只读 TextBox」冒充 TextBlock。
+             去掉边框 / 背景 / 内边距后外观与 TextBlock 基本一致，但能鼠标拖选、Ctrl+C、
+             右键菜单（复制 / 全选）。IsTabStop=False 只是不参与 Tab 遍历，
+             点一下照样能选中，避免一打开关于框就抢焦点的蓝底选中块。 -->
+        <Style x:Key="CopyableText" TargetType="TextBox">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="IsReadOnlyCaretVisible" Value="False"/>
+            <Setter Property="IsTabStop" Value="False"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Cursor" Value="IBeam"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        </Style>
+    </Window.Resources>
+
     <DockPanel Margin="20,18,20,14">
         <!-- 底部按钮 -->
         <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
@@ -21,17 +39,19 @@
 
         <StackPanel>
             <!-- 产品名 + 版本 -->
-            <TextBlock x:Name="ProductNameText" Text="X-批注"
-                       FontFamily="Microsoft YaHei, 微软雅黑"
-                       FontSize="20" FontWeight="Bold"
-                       Foreground="#1A73E8"
-                       HorizontalAlignment="Center"
-                       TextAlignment="Center"/>
-            <TextBlock x:Name="VersionText" Text="V0.0.0"
-                       FontSize="12" Foreground="Gray"
-                       HorizontalAlignment="Center"
-                       TextAlignment="Center"
-                       Margin="0,6,0,14"/>
+            <TextBox x:Name="ProductNameText" Style="{StaticResource CopyableText}"
+                     Text="X-批注"
+                     FontFamily="Microsoft YaHei, 微软雅黑"
+                     FontSize="20" FontWeight="Bold"
+                     Foreground="#1A73E8"
+                     TextAlignment="Center"
+                     HorizontalAlignment="Stretch"/>
+            <TextBox x:Name="VersionText" Style="{StaticResource CopyableText}"
+                     Text="V0.0.0"
+                     FontSize="12" Foreground="Gray"
+                     TextAlignment="Center"
+                     HorizontalAlignment="Stretch"
+                     Margin="0,6,0,14"/>
 
             <Rectangle Height="1" Fill="#D0D0D0" Margin="0,0,0,12"/>
 
@@ -48,25 +68,29 @@
                 </Grid.RowDefinitions>
 
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="设计" Foreground="#555555" Margin="0,0,0,8"/>
-                <TextBlock x:Name="DesignerText" Grid.Row="0" Grid.Column="1" Foreground="Black" Margin="0,0,0,8"/>
+                <TextBox x:Name="DesignerText" Style="{StaticResource CopyableText}"
+                         Grid.Row="0" Grid.Column="1" Foreground="Black" Margin="0,0,0,8"/>
 
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="邮箱" Foreground="#555555" Margin="0,0,0,8"/>
-                <TextBlock x:Name="EmailText" Grid.Row="1" Grid.Column="1" Foreground="Black" Margin="0,0,0,8"/>
+                <TextBox x:Name="EmailText" Style="{StaticResource CopyableText}"
+                         Grid.Row="1" Grid.Column="1" Foreground="Black" Margin="0,0,0,8"/>
 
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="QQ群" Foreground="#555555"/>
-                <TextBlock x:Name="QqGroupText" Grid.Row="2" Grid.Column="1" Foreground="Black"/>
+                <TextBox x:Name="QqGroupText" Style="{StaticResource CopyableText}"
+                         Grid.Row="2" Grid.Column="1" Foreground="Black"/>
             </Grid>
 
             <Rectangle Height="1" Fill="#D0D0D0" Margin="0,12,0,0"/>
 
             <!-- 最下方来源声明：保留原始作者署名，请勿删除。 -->
-            <TextBlock x:Name="CreditText"
-                       Margin="0,10,0,0"
-                       FontSize="11"
-                       Foreground="#808080"
-                       TextWrapping="Wrap"
-                       TextAlignment="Center"
-                       HorizontalAlignment="Center"/>
+            <TextBox x:Name="CreditText"
+                     Style="{StaticResource CopyableText}"
+                     Margin="0,8,0,0"
+                     FontSize="11"
+                     Foreground="#808080"
+                     TextWrapping="Wrap"
+                     TextAlignment="Center"
+                     HorizontalAlignment="Stretch"/>
         </StackPanel>
     </DockPanel>
 </Window>
