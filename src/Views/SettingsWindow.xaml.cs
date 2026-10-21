@@ -36,8 +36,10 @@ namespace XAnnotation.Views
         /// <summary>显示或激活设置窗口（单例、非模态）。
         /// <para><b>非模态</b>是刻意的：模态（原先走的 <c>ShowModalWindow</c>）会禁用其它顶层窗口，
         /// 于是"设置窗口一开，批注面板既点不动、也不能单独关、必须先退出设置窗口"。</para>
-        /// <para>anchor 给出时，新窗口会摆在它的右侧（面板固定在屏幕左上角，这样两个窗口同时可见）。</para></summary>
-        internal static SettingsWindow ShowOrActivate(AnnotationSettings settings, IEnumerable<string> textStyles = null, Window anchor = null)
+        /// <para>位置：默认<b>居中于显示器</b>（XAML 里声明 <c>CenterScreen</c>，再由
+        /// <see cref="CadDialog.CenterOnMonitor"/> 按物理像素摆正）。不再贴着批注面板摆，
+        /// 因为面板固定左上角、设置窗跟在右侧时常常半个身子在屏幕外。</para></summary>
+        internal static SettingsWindow ShowOrActivate(AnnotationSettings settings, IEnumerable<string> textStyles = null)
         {
             var existing = _instance;
             if (existing != null && existing.IsLoaded)
@@ -57,30 +59,10 @@ namespace XAnnotation.Views
             }
 
             var window = new SettingsWindow(settings, textStyles);
-            if (anchor != null) PlaceBeside(window, anchor);
             window.Closed += (_, __) => { if (ReferenceEquals(_instance, window)) _instance = null; };
             _instance = window;
             CadDialog.ShowModeless(window);
             return window;
-        }
-
-        /// <summary>把窗口摆到参照窗口右侧（越界时贴到可用区域右边缘）。</summary>
-        private static void PlaceBeside(Window window, Window anchor)
-        {
-            try
-            {
-                var area = SystemParameters.WorkArea;
-                var width = window.Width > 0 ? window.Width : 640;
-                var height = window.Height > 0 ? window.Height : 540;
-                var left = anchor.Left + anchor.ActualWidth + 12;
-                if (left + width > area.Right - 8) left = Math.Max(area.Left + 8, area.Right - 8 - width);
-                var top = Math.Min(Math.Max(area.Top + 8, anchor.Top), Math.Max(area.Top + 8, area.Bottom - 8 - height));
-                // Manual 必须在 Show 之前设：窗口默认会被挂到 CAD 主窗口后"居中于主窗口"。
-                window.WindowStartupLocation = WindowStartupLocation.Manual;
-                window.Left = left;
-                window.Top = top;
-            }
-            catch (Exception ex) { PluginLog.Warning("SettingsWindow.PlaceBeside", ex.Message); }
         }
 
         /// <summary>构造设置窗口。textStyles 为当前 DWG 中可用的文字样式名列表。</summary>

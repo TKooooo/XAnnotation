@@ -70,6 +70,9 @@ namespace XAnnotation
             WpfHost.Ensure();
             try { AttachToCadMainWindow(window); }
             catch (Exception ex) { PluginLog.Error("WPF.AttachToCadMainWindow", ex); }
+            // 与模态一致：自己声明了"居中于屏幕"的窗口（批注设置窗）也由我们摆一次。
+            // 非模态窗口没有 ShowModalWindow 那层包裹，但 Show 之后同样可能被 Windows 摆到层叠位置。
+            if (window.WindowStartupLocation == WindowStartupLocation.CenterScreen) CenterOnMonitor(window);
             window.Show();
         }
 
@@ -244,8 +247,8 @@ namespace XAnnotation
 
         /// <summary>显式把 WPF 窗口挂到 CAD 主窗口（模态窗口挂不上时可能落到 CAD 后面）。
         /// <para>定位规则：<b>窗口自己表过态就不动它</b> —— <see cref="WindowStartupLocation.Manual"/>
-        /// 是调用方已经摆好的位置（如设置窗口贴在面板旁边），<see cref="WindowStartupLocation.CenterScreen"/>
-        /// 是窗口明确要求"居中于屏幕"（批注内容窗口，XAML 里写的）。
+        /// 是调用方已经摆好的位置（如批注内容窗由外部算好落点），<see cref="WindowStartupLocation.CenterScreen"/>
+        /// 是窗口明确要求"居中于屏幕"（批注设置窗、批注内容窗，XAML 里写的，再由 CenterOnMonitor 摆正）。
         /// 只有 <see cref="WindowStartupLocation.CenterOwner"/> 这类"居中于属主"的默认意图，
         /// 才按挂载结果决定居中于 CAD 主窗口还是屏幕。</para></summary>
         private static void AttachToCadMainWindow(Window window)
