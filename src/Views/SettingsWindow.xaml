@@ -11,6 +11,9 @@
         <ResourceDictionary Source="../Themes/XTheme.xaml"/>
     </Window.Resources>
 
+    <!-- 表单列宽约定：左侧标签列固定 120，右侧输入列固定 240（下拉/输入框不再随窗口变宽而拉长）。
+         240 是"能把设置里所有下拉项与输入内容完整显示"的合适宽度：标签仍是右对齐贴着输入框、
+         行高由控件自身 MinHeight 决定，所以窗口拉宽只会让右侧留白变多，对齐关系与高度都不变。 -->
     <DockPanel>
         <!-- 底部按钮栏。
              注意：这是**非模态**窗口，按钮上不能写 IsCancel / IsDefault —— 那是"对话框"语义，
@@ -34,7 +37,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="240"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -61,7 +64,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="240"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -99,7 +102,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="240"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -120,7 +123,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="240"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="固定宽度值" Style="{StaticResource FieldLabel}"/>
                             <TextBox x:Name="FixedWidthValueText" Grid.Column="1"/>
@@ -132,7 +135,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="240"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -172,7 +175,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="240"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -202,7 +205,7 @@
                         <Grid Margin="0,4,0,0">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="240"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -240,7 +243,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="240"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -259,7 +262,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="240"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
