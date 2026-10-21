@@ -1,5 +1,6 @@
 using System;
 using System.Windows;
+using System.Windows.Input;
 
 namespace XAnnotation.Views
 {
@@ -37,6 +38,20 @@ namespace XAnnotation.Views
         {
             DialogResult = true;
             Close();
+        }
+
+        /// <summary>Esc 关闭：关于框只有「确定」一个出口，用户按 Esc 的预期就是关掉它。
+        /// <para>放在 Preview 阶段做，与本窗口里哪个控件拿着焦点无关（不依赖按钮的 IsCancel）。
+        /// 宿主那边面板挂的全局 Esc 钩子只是借这一下做收尾判断、从不吞键，所以这里能拿到完整的 Esc。</para></summary>
+        protected override void OnPreviewKeyDown(KeyEventArgs e)
+        {
+            if (e.Key == Key.Escape)
+            {
+                e.Handled = true;
+                Close();
+                return;
+            }
+            base.OnPreviewKeyDown(e);
         }
 
         /// <summary>

@@ -239,18 +239,20 @@ namespace XAnnotation
         }
 
         /// <summary>显式把 WPF 窗口挂到 CAD 主窗口（模态窗口挂不上时可能落到 CAD 后面）。
-        /// <para>调用方已经自己指定了 <see cref="WindowStartupLocation.Manual"/> 并摆好位置的，不再改成"居中于主窗口"。</para></summary>
+        /// <para>定位规则：<b>窗口自己表过态就不动它</b> —— <see cref="WindowStartupLocation.Manual"/>
+        /// 是调用方已经摆好的位置（如设置窗口贴在面板旁边），<see cref="WindowStartupLocation.CenterScreen"/>
+        /// 是窗口明确要求"居中于屏幕"（批注内容窗口，XAML 里写的）。
+        /// 只有 <see cref="WindowStartupLocation.CenterOwner"/> 这类"居中于属主"的默认意图，
+        /// 才按挂载结果决定居中于 CAD 主窗口还是屏幕。</para></summary>
         private static void AttachToCadMainWindow(Window window)
         {
             var handle=GetCadMainWindowHandle();
             if(handle!=IntPtr.Zero)
-            {
                 new WindowInteropHelper(window).Owner=handle;
-                if(window.WindowStartupLocation!=WindowStartupLocation.Manual)
-                    window.WindowStartupLocation=WindowStartupLocation.CenterOwner;
-            }
-            else if(window.WindowStartupLocation!=WindowStartupLocation.Manual)
-                window.WindowStartupLocation=WindowStartupLocation.CenterScreen;
+
+            var location=window.WindowStartupLocation;
+            if(location==WindowStartupLocation.Manual||location==WindowStartupLocation.CenterScreen)return;
+            window.WindowStartupLocation=handle!=IntPtr.Zero?WindowStartupLocation.CenterOwner:WindowStartupLocation.CenterScreen;
         }
 
         private static IntPtr GetCadMainWindowHandle()
