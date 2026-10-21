@@ -32,15 +32,58 @@ namespace XAnnotation
 {
     internal static class RegionPreviewDrawing
     {
+        private static bool _traitsLogged;
+        private static bool _opaqueFailedLogged;
+        private static bool _fallbackLogged;
+
         /// <summary>
-        /// 打开预览的实心填充。**每个预览 Jig 的 WorldDraw 入口都要先调它。**
-        /// <para>原因：AutoCAD 调用 WorldDraw 之前会按"再生类型"重置填充类型，再生类型为 StandardDisplay 时
+        /// 预览外观预处理：实心填充 + 不透明。**每个预览 Jig 的 WorldDraw 入口都要先调它。**
+        /// <para><b>填充</b>：AutoCAD 调用 WorldDraw 之前会按"再生类型"重置填充类型，再生类型为 StandardDisplay 时
         /// 会被置成 <c>FillNever</c>——这正是 Jig 拖拽期间的状态。显式置 <c>FillAlways</c> 后，
         /// 由 <see cref="DrawWidePolyline"/> 显式绘制的实心带才不会被去掉。</para>
+        /// <para><b>不透明</b>（"绘制过程中淡显"的真正原因）：拖拽管线会按 50% 透明度合成
+        /// WorldDraw 的输出，所以预览里的云线/引线看起来像蒙了层纱，而落图后走实体渲染就恢复正常。
+        /// 抓屏取像素可验证：预览是 (128,0,128)，落图是 (255,0,255)——正好一半；相邻梯形小块重叠处
+        /// 还能叠出 192，可见是<b>逐图元</b>按透明度混合，而不是整帧统一滤镜。既然在 traits 这一层，
+        /// 就能就地关掉：<c>SubEntityTraits.Transparency</c> 显式置为不透明。
+        /// 每帧都要置——AutoCAD 在每次 WorldDraw 之前重新初始化 subentity traits。</para>
         /// </summary>
-        internal static void EnableSolidFill(WorldDraw draw)
+        internal static void PreparePreviewTraits(WorldDraw draw)
         {
-            draw.SubEntityTraits.FillType = FillType.FillAlways;
+            var traits = draw.SubEntityTraits;
+            traits.FillType = FillType.FillAlways;
+
+            // 记录宿主给的初始透明度，只留一次：这条日志是"淡显"诊断的直接证据。
+            if (!_traitsLogged)
+            {
+                _traitsLogged = true;
+                try
+                {
+                    var old = traits.Transparency;
+                    PluginLog.Info(
+                        "PreviewTraits",
+                        "拖拽预览的初始透明度: ByLayer=" + old.IsByLayer +
+                        " ByBlock=" + old.IsByBlock + " Alpha=" + old.Alpha);
+                }
+                catch (Exception ex)
+                {
+                    PluginLog.Warning("PreviewTraits", "读预览初始透明度失败：" + ex.Message);
+                }
+            }
+
+            try
+            {
+                traits.Transparency = new Transparency((byte)0);   // Alpha=0 即完全不透明
+            }
+            catch (Exception ex)
+            {
+                // 老版本/非 AutoCAD 平台可能没有这个属性：只留一次日志，不影响绘制本身。
+                if (!_opaqueFailedLogged)
+                {
+                    _opaqueFailedLogged = true;
+                    PluginLog.Warning("PreviewTraits", "把拖拽预览置为不透明失败（保持宿主默认）：" + ex.Message);
+                }
+            }
         }
 
         /// <summary>
@@ -78,9 +121,15 @@ namespace XAnnotation
             {
                 DrawPolylineBand(draw, polyline, width);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 // 填充路径出任何岔子，至少把中心线画出来，避免"整条云线凭空消失"。
+                // 但降级后画面会变成一条细线，光看屏幕分不清是"没填充"还是"抛了异常"，故留一次日志。
+                if (!_fallbackLogged)
+                {
+                    _fallbackLogged = true;
+                    PluginLog.Warning("DrawWidePolyline", "实心带绘制失败，已退回中心线：" + ex.Message);
+                }
                 try { draw.Geometry.Draw(polyline); } catch { /* 预览对象，失败即放弃本帧 */ }
             }
         }
@@ -224,11 +273,36 @@ namespace XAnnotation
                 dir = dir.GetNormal();
                 var normal = new Vector3d(-dir.Y, dir.X, 0);
 
+                var left0 = new Point3d(p0.X + normal.X * h0, p0.Y + normal.Y * h0, p0.Z);
+                var left1 = new Point3d(p1.X + normal.X * h1, p1.Y + normal.Y * h1, p1.Z);
+                var right1 = new Point3d(p1.X - normal.X * h1, p1.Y - normal.Y * h1, p1.Z);
+                var right0 = new Point3d(p0.X - normal.X * h0, p0.Y - normal.Y * h0, p0.Z);
+
                 var poly = new Point3dCollection();
-                poly.Add(new Point3d(p0.X + normal.X * h0, p0.Y + normal.Y * h0, p0.Z));
-                poly.Add(new Point3d(p1.X + normal.X * h1, p1.Y + normal.Y * h1, p1.Z));
-                poly.Add(new Point3d(p1.X - normal.X * h1, p1.Y - normal.Y * h1, p1.Z));
-                poly.Add(new Point3d(p0.X - normal.X * h0, p0.Y - normal.Y * h0, p0.Z));
+
+                // 渐变（锥形）样式下，每段起笔宽度正好是 0 —— 此时 p0±0 是**同一个点**。
+                // 把这个"退化成四边形"的三角形交给 Geometry.Polygon，宿主会直接抛
+                // eInvalidInput（整条带都会因此退回细中心线），所以这里显式收敛成三边形。
+                if (h0 <= 1e-12)
+                {
+                    poly.Add(p1);      // 尖端
+                    poly.Add(left1);
+                    poly.Add(right1);
+                }
+                else if (h1 <= 1e-12)
+                {
+                    poly.Add(p0);      // 尖端
+                    poly.Add(left0);
+                    poly.Add(right0);
+                }
+                else
+                {
+                    poly.Add(left0);
+                    poly.Add(left1);
+                    poly.Add(right1);
+                    poly.Add(right0);
+                }
+
                 yield return poly;
             }
         }
@@ -471,7 +545,7 @@ namespace XAnnotation
 
         protected override bool WorldDraw(WorldDraw draw)
         {
-            RegionPreviewDrawing.EnableSolidFill(draw);
+            RegionPreviewDrawing.PreparePreviewTraits(draw);
             RegionPreviewDrawing.DrawHistory(
                 draw,
                 _bulgeSign,
@@ -502,7 +576,7 @@ namespace XAnnotation
         protected override SamplerStatus Sampler(JigPrompts prompts){if(InteractionAbort.Requested){Aborted=true;return SamplerStatus.Cancel;}var o=new JigPromptPointOptions("\n指定批注范围另一个角点: "){UseBasePoint=true,BasePoint=_first,Cursor=CursorType.Crosshair};var r=prompts.AcquirePoint(o);if(r.Status!=PromptStatus.OK)return SamplerStatus.Cancel;if(!_hasSample){_hasSample=true;_current=r.Value;return SamplerStatus.OK;}if(r.Value.DistanceTo(_current)<1e-8)return SamplerStatus.NoChange;_current=r.Value;return SamplerStatus.OK;}
         protected override bool WorldDraw(WorldDraw draw)
         {
-            RegionPreviewDrawing.EnableSolidFill(draw);
+            RegionPreviewDrawing.PreparePreviewTraits(draw);
             RegionPreviewDrawing.DrawHistory(draw,_bulgeSign,_ucsToWcs,_wcsToUcs,_source,_historyFirsts,_historySeconds);
             var first=_first.TransformBy(_wcsToUcs);var current=_current.TransformBy(_wcsToUcs);var w=Math.Abs(current.X-first.X);var h=Math.Abs(current.Y-first.Y);if(w<1e-8||h<1e-8)return true;
             var settings=AnnotationService.ResolveEffectiveSettings(_doc,_source,new AnnotationData(),Math.Sqrt(w*w+h*h));
@@ -704,8 +778,8 @@ namespace XAnnotation
         /// 每个部件各自 try：某一项画不出来也不会连累其它项，更不会让整帧预览一起消失。</summary>
         protected override bool WorldDraw(WorldDraw draw)
         {
-            // 宽带状几何在 Jig 里默认不填充，会显示成半透明描边——见 EnableSolidFill 的说明。
-            RegionPreviewDrawing.EnableSolidFill(draw);
+            // 拖拽管线默认不填充、且按 50% 透明度合成（看起来就是"淡显"）——见 PreparePreviewTraits 的说明。
+            RegionPreviewDrawing.PreparePreviewTraits(draw);
 
             var localText = _current.TransformBy(_wcsToUcs);
             var boxCorners = BuildBoxCorners(localText);
@@ -936,7 +1010,7 @@ namespace XAnnotation
                 return true;
             }
 
-            RegionPreviewDrawing.EnableSolidFill(draw);
+            RegionPreviewDrawing.PreparePreviewTraits(draw);
 
             var local = _points
                 .Concat(new[] { _current })
@@ -1054,7 +1128,7 @@ namespace XAnnotation
         protected override bool WorldDraw(WorldDraw draw)
         {
             // 被克隆的真实云线同样是宽多段线，需一并打开填充，否则拖动预览也会显示成半透明。
-            RegionPreviewDrawing.EnableSolidFill(draw);
+            RegionPreviewDrawing.PreparePreviewTraits(draw);
 
             var displacement = _current - _basePoint;
             var transform = Matrix3d.Displacement(displacement);
