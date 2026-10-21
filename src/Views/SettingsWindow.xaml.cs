@@ -263,11 +263,11 @@ namespace XAnnotation.Views
                            " → 图面字高 = " + Num(textMm) + "mm × " + denominator + " = " + Num(textMm * n) +
                            "；图面云线半径 = " + Num(radiusMm) + "mm × " + denominator + " = " + Num(radiusMm * n) + "。";
                 if (On(FontAutoFitCheck) && On(CloudAutoFitCheck))
-                    hint += " 当前勾选了字体/云线自适应：字高与云线半径都按云线尺寸计算，上面的比例不参与。";
+                    hint += " 当前勾选了字体/云线自适应：字高按云线尺寸计算；云线弧瓣仍按上面的比例换算，框选范围只决定瓣数。";
                 else if (On(FontAutoFitCheck))
                     hint += " 当前勾选了字体自适应：字高按云线尺寸计算、比例不参与字高换算。";
                 else if (On(CloudAutoFitCheck))
-                    hint += " 当前勾选了云线自适应：云线半径与线宽按云线尺寸计算、比例不参与。";
+                    hint += " 当前勾选了云线自适应：弧瓣按上面的比例换算，框选范围只决定瓣数。";
                 ScaleHintText.Text = hint;
             }
             catch (Exception ex)
@@ -281,9 +281,10 @@ namespace XAnnotation.Views
         {
             if (!IsInitialized) return;
             FixedWidthValueText.IsEnabled = On(FixedWidthCheck);
-            var cloudAuto = On(CloudAutoFitCheck);
-            CloudRadiusText.IsEnabled = !cloudAuto;
-            LineWidthText.IsEnabled = !cloudAuto;
+            // 云线自适应现在只让"瓣数"随框大小变，弧瓣半径/线宽仍按这里的打印尺寸 × 图面比例换算，
+            // 所以这两个输入框始终保持可用。
+            CloudRadiusText.IsEnabled = true;
+            LineWidthText.IsEnabled = true;
             var fontAuto = On(FontAutoFitCheck);
             AutoTextViewPercentText.IsEnabled = fontAuto;
             HeaderHeightText.IsEnabled = !fontAuto;

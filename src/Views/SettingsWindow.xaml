@@ -52,7 +52,7 @@
                             <TextBlock Grid.Row="3" Grid.Column="0" Text="云线线宽(mm)" Style="{StaticResource FieldLabel}"/>
                             <TextBox x:Name="LineWidthText" Grid.Row="3" Grid.Column="1"/>
                         </Grid>
-                        <CheckBox x:Name="CloudAutoFitCheck" Content="云线自适应"
+                        <CheckBox x:Name="CloudAutoFitCheck" Content="云线自适应（框选越大只增加瓣数，弧瓣大小仍按比例）"
                                   Checked="Dependency_Changed" Unchecked="Dependency_Changed" Margin="120,4,0,2"/>
 
                         <Rectangle Style="{StaticResource SectionSeparator}"/>
@@ -285,8 +285,9 @@
                         <TextBlock Style="{StaticResource Caption}" Margin="0,0,0,10">
                             • 设置保存在本机（%AppData%\XAnnotation\settings.xml）<LineBreak/>
                             • 批注数据编码后存储在 DWG 图形内，随图纸传递<LineBreak/>
-                            • 启用字体自适应后，字高按云线对角线尺寸 × 百分比自动计算<LineBreak/>
-                            • 未启用自适应时按比例换算：字高 = 打印字高(mm) × N，云线半径 = 打印云线半径(mm) × N（选比例不会再自动取消自适应）<LineBreak/>
+                            • 云线弧瓣始终按图面比例换算：半径 = 打印半径(mm) × N，框选范围只决定瓣数（总图上不会变成大波浪）<LineBreak/>
+                            • N 优先按图内文字字高自动识别（米制总图也能算对）；识别不到时才用上面的比例选型<LineBreak/>
+                            • 启用字体自适应后，字高按云线对角线尺寸 × 百分比自动计算；未启用时字高 = 打印字高(mm) × N<LineBreak/>
                             • 创建命令执行时，命令行会显示本次实际采用的字高和云线半径
                         </TextBlock>
 

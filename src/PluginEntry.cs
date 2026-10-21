@@ -353,6 +353,9 @@ namespace XAnnotation
                 // 布防途中切了图纸：作废本次双击，并把临时改掉的 QPMODE 还回去。
                 if (_doubleClickArmed) { DisarmDoubleClick(); RestoreQuickPropertiesMode(); }
                 AnnotationService.SyncNextNumber(e.Document);
+                // 换图后必须让图面单位重新识别：缓存是按"当前图"成立的一次性结果，
+                // 不清就会把上一张图的比例套到这一张上。
+                DrawingScale.Forget();
                 DrawingScale.Ensure(e.Document);
                 ObserveDatabase(e.Document?.Database);
                 XAnnotation.Views.AnnotationPanel.HandleDocumentActivated(e.Document);

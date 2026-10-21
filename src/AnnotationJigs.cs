@@ -356,12 +356,15 @@ namespace XAnnotation
         }
 
         /// <summary>重绘"已经确认过的"云线范围（多对一/仅绘云线时给用户看进度）。
+        /// <para><paramref name="doc"/> 只用来读 <see cref="DrawingScale"/> 的缓存值（纯静态字段，不碰数据库），
+        /// 保证历史云线预览与最终落图用同一套图面比例。</para>
         /// <para><b>本方法在 WorldDraw 里调用，绝不能访问数据库或编辑器</b>：原先每画一条历史云线就调一次
         /// <c>OrientCloudBulgesForView</c>（内含 <c>Editor.GetCurrentView()</c>），多对一时就是"每帧 × 每条"
         /// 的编辑器访问量，AutoCAD 会直接丢弃这些帧——表现就是多对一拖拽时预览闪烁/卡顿。
         /// 现在弧瓣朝向由调用方在拖拽开始前问一次，通过 <paramref name="bulgeSign"/> 传进来。</para></summary>
         internal static void DrawHistory(
             WorldDraw draw,
+            Document doc,
             double bulgeSign,
             Matrix3d ucsToWcs,
             Matrix3d wcsToUcs,
@@ -379,7 +382,7 @@ namespace XAnnotation
                 // 对角线为 0 会让 ResolveEffectiveSettings 去问视图——拖拽期间不允许，直接跳过这一条。
                 if (diagonal <= 0) continue;
                 var settings = AnnotationService.ResolveEffectiveSettings(
-                    null,
+                    doc,
                     source,
                     null,
                     diagonal);
@@ -548,6 +551,7 @@ namespace XAnnotation
             RegionPreviewDrawing.PreparePreviewTraits(draw);
             RegionPreviewDrawing.DrawHistory(
                 draw,
+                _doc,
                 _bulgeSign,
                 _ucsToWcs,
                 _wcsToUcs,
@@ -577,7 +581,7 @@ namespace XAnnotation
         protected override bool WorldDraw(WorldDraw draw)
         {
             RegionPreviewDrawing.PreparePreviewTraits(draw);
-            RegionPreviewDrawing.DrawHistory(draw,_bulgeSign,_ucsToWcs,_wcsToUcs,_source,_historyFirsts,_historySeconds);
+            RegionPreviewDrawing.DrawHistory(draw,_doc,_bulgeSign,_ucsToWcs,_wcsToUcs,_source,_historyFirsts,_historySeconds);
             var first=_first.TransformBy(_wcsToUcs);var current=_current.TransformBy(_wcsToUcs);var w=Math.Abs(current.X-first.X);var h=Math.Abs(current.Y-first.Y);if(w<1e-8||h<1e-8)return true;
             var settings=AnnotationService.ResolveEffectiveSettings(_doc,_source,new AnnotationData(),Math.Sqrt(w*w+h*h));
             using(var cloud=AnnotationService.BuildCloud(ToMin(first,current),ToMax(first,current),settings)){AnnotationService.ApplyPreviewAppearance(cloud,settings,settings.CloudColor,"cloud");cloud.Elevation=first.Z;cloud.TransformBy(_ucsToWcs);AnnotationService.OrientCloudBulges(cloud,_bulgeSign);RegionPreviewDrawing.DrawWidePolyline(draw,cloud,RegionPreviewDrawing.SafePolylineWidth(cloud));

@@ -35,23 +35,32 @@ namespace XAnnotation
         /// <summary>本插件自己生成的批注图层前缀：统计时排除，免得自适应后的大字反过来污染基准。</summary>
         private const string OwnLayerPrefix = "X-批注";
 
-        private static Database _probedDb;
+        /// <summary>最多看这么多文字就够定基准了，大图上不必把整个模型空间走完。</summary>
+        private const int MaxSamples = 400;
+
         private static double _unitsPerMm;
         private static int _samples;
+
+        /// <summary>当前缓存是否属于"当前这张图"。
+        /// <para><b>不要用 <c>ReferenceEquals(db, _probedDb)</c> 判断</b>：日志里出现过同一张图连续多次
+        /// "重新识别"，说明 <c>Document.Database</c> 每次拿到的包装对象不保证是同一个实例，
+        /// 引用比较永远不相等——缓存等于失效，识别值永远读不到，1.0.5 的比例修正也就等于没生效。
+        /// 改成由文档事件驱动的显式失效（<see cref="Forget"/>）：激活/关闭图纸后清一次，
+        /// 下一次 <see cref="Ensure"/> 重新探测。</para></summary>
+        private static bool _valid;
 
         /// <summary>1 毫米对应多少图形单位；未探测或识别失败返回 0（调用方退回比例选型）。</summary>
         internal static double UnitsPerMillimeter(Document doc)
         {
-            var db = doc == null ? null : doc.Database;
-            if (db == null) return 0;
-            return ReferenceEquals(db, _probedDb) ? _unitsPerMm : 0;
+            if (doc == null || !_valid) return 0;
+            return _unitsPerMm;
         }
 
         /// <summary>探测并缓存当前图纸的单位系数。调用点必须是命令/文档事件上下文，不要放在拖拽回调里。</summary>
         internal static void Ensure(Document doc)
         {
             var db = doc == null ? null : doc.Database;
-            if (db == null || ReferenceEquals(db, _probedDb)) return;
+            if (db == null || _valid) return;
 
             var samples = 0;
             var value = 0.0;
@@ -61,9 +70,9 @@ namespace XAnnotation
                 PluginLog.Warning("DrawingScale", "识别图面单位失败，按比例选型换算：" + ex.Message);
             }
 
-            _probedDb = db;
             _unitsPerMm = value;
             _samples = samples;
+            _valid = true;
 
             if (value > 0)
             {
@@ -78,18 +87,18 @@ namespace XAnnotation
             }
         }
 
-        /// <summary>换图/换文档时清缓存。</summary>
+        /// <summary>换图/换文档时清缓存（在 DocumentActivated / 关闭文档时调用）。</summary>
         internal static void Forget()
         {
-            _probedDb = null;
             _unitsPerMm = 0;
             _samples = 0;
+            _valid = false;
         }
 
         private static double Probe(Database db, out int sampleCount)
         {
             sampleCount = 0;
-            var heights = new List<double>(64);
+            var heights = new List<double>(MaxSamples);
 
             using (var tr = db.TransactionManager.StartTransaction())
             {
@@ -120,7 +129,12 @@ namespace XAnnotation
                     }
                     catch { continue; }
 
-                    if (height > 1e-9 && height < 1e9) heights.Add(height);
+                    if (height > 1e-9 && height < 1e9)
+                    {
+                        heights.Add(height);
+                        // 大图（总图像素级几十万实体）没必要走完：样本够定四分位就收手。
+                        if (heights.Count >= MaxSamples) break;
+                    }
                 }
 
                 tr.Commit();
