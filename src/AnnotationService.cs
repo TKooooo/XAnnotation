@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -52,23 +52,32 @@ namespace XAnnotation
         {
             var s=source.Clone();
             var scale=source.ScaleRatio>0?source.ScaleRatio:1.0; // 出图比例分母（1:100 → 100）：打印 mm → 图面单位
+            // 图面单位不一定是毫米：总图/场地图常用米（车位间距 2.4、建筑 14 就是 2.4m、14m）。
+            // 那种图上"比例选型 1:N"会把尺寸整体放大 1000 倍，字高与云线弧瓣都会离谱。
+            // 用图内文字字高识别出的系数顶上（两者相差不足 5 倍时仍尊重用户选的比例）。
+            var detected=DrawingScale.UnitsPerMillimeter(doc);
+            var unitMismatch=detected>0&&(detected>scale*5.0||detected*5.0<scale);
+            var unitScale=unitMismatch?detected:scale;
             var rawText=Math.Max(source.TextHeight,0.1);          // 打印字高（mm）
             var refSize=cloudDiagonal;
             if(refSize<=0){using(var view=doc.Editor.GetCurrentView())refSize=view.Height;}
             var adaptiveText=Math.Max(0.1,refSize*Math.Max(0.1,source.AutoTextViewPercent)/100.0);
-            var text=source.FontAutoFit?adaptiveText:rawText*scale;
+            // 按框大小的自适应只在"框能代表图面尺度"时成立。单位对不上时框往往也一并被放大过
+            // （总图缩到全图范围框选，框就是几百万单位），这时改按图面换算取尺寸，
+            // 否则字高会跟着框一起膨胀，云线弧瓣也大到不成形。
+            var text=(source.FontAutoFit&&!unitMismatch)?adaptiveText:rawText*unitScale;
             var factor=text/rawText; // 相对"打印字高"的放大倍数：首行/次行/固定宽度/对勾高度沿用同一倍数
             s.TextHeight=text;s.HeaderHeight=Math.Max(0.1,source.HeaderHeight*factor);s.SecondLineHeight=Math.Max(0.1,source.SecondLineHeight*factor);
             s.FixedWidthValue=Math.Max(text*6,source.FixedWidthValue*factor);
-            if(source.CloudAutoFit)
+            if(source.CloudAutoFit&&!unitMismatch)
             {
                 s.CloudRadius=Math.Max(0.001,adaptiveText*0.75);
                 s.LineWidth=Math.Max(0.001,adaptiveText*0.035);
             }
             else
             {
-                s.CloudRadius=Math.Max(0.001,source.CloudRadius*scale);
-                s.LineWidth=Math.Max(0,source.LineWidth*scale);
+                s.CloudRadius=Math.Max(0.001,source.CloudRadius*unitScale);
+                s.LineWidth=Math.Max(0,source.LineWidth*unitScale);
             }
             s.CheckHeight=Math.Max(source.CheckHeight*factor,text*2);if(captureRenderSettings&&data!=null){data.RenderTextHeight=s.TextHeight;data.RenderHeaderHeight=s.HeaderHeight;data.RenderSecondLineHeight=s.SecondLineHeight;data.RenderCloudRadius=s.CloudRadius;data.RenderLineWidth=s.LineWidth;}return s;
         }
@@ -85,6 +94,8 @@ namespace XAnnotation
         /// 面板中改外形/选项能立刻反映到预览上。</para></summary>
         public static bool PromptGeometry(Document doc, AnnotationSettings s, out Point3d firstPoint, out Point3d secondPoint)
         {
+            // 进入交互前先识别一次图面单位（要开事务扫文字，不能放在拖拽回调里）。
+            DrawingScale.Ensure(doc);
             firstPoint=Point3d.Origin;secondPoint=Point3d.Origin;var ed = doc.Editor;object ortho=null,osmode=null;
             try{
                 if(s.AutoCloseOrtho){ortho=CadSystemVariable("ORTHOMODE");SetCadSystemVariable("ORTHOMODE",0);}if(s.AutoCloseSnap){osmode=CadSystemVariable("OSMODE");SetCadSystemVariable("OSMODE",0);}
@@ -93,7 +104,7 @@ namespace XAnnotation
                 if(firstJig.Aborted){ed.WriteMessage("\n绘制选项已更改，本轮按新选项重新开始。");return false;}
                 if(firstResult.Status!=PromptStatus.OK)return false;
                 var firstWcs=firstJig.Current.TransformBy(GetUcsMatrix(doc));
-                var region=new RegionPreviewJig(doc,firstWcs,s);var regionResult=ed.Drag(region);
+                var region=new RegionPreviewJig(doc,firstWcs,s);PromptResult regionResult;try{regionResult=ed.Drag(region);}finally{PreviewTransient.Clear();}
                 if(region.Aborted){ed.WriteMessage("\n绘制选项已更改，本轮按新选项重新开始。");return false;}
                 if(regionResult.Status!=PromptStatus.OK)return false;
                 var (_,regionWidth,regionHeight)=UcsAlignedExtents(doc,firstWcs,region.Current);if(regionWidth<=1e-6||regionHeight<=1e-6){ed.WriteMessage("\n批注范围必须同时具有宽度和高度，请重新指定。");return false;}
@@ -110,6 +121,7 @@ namespace XAnnotation
         /// <see cref="InteractionAbort"/> 干净中止（<c>GetPoint</c> 是黑盒，外部中止不了）。</para></summary>
         public static bool PromptBasePoint(Document doc, out Point3d basePoint)
         {
+            DrawingScale.Ensure(doc);
             basePoint = Point3d.Origin;
             var ed = doc.Editor;
             var jig = new FirstCornerPromptJig("\n指定批注基点: ");
@@ -131,6 +143,7 @@ namespace XAnnotation
 
         private static CloudPromptResult PromptCloud(Document doc, AnnotationSettings s, bool allowFinish, IList<Point3d> historyFirsts, IList<Point3d> historySeconds, out Point3d firstPoint, out Point3d secondPoint)
         {
+            DrawingScale.Ensure(doc);
             firstPoint=Point3d.Origin;secondPoint=Point3d.Origin;var ed=doc.Editor;object ortho=null,osmode=null;
             try{
                 if(s.AutoCloseOrtho){ortho=CadSystemVariable("ORTHOMODE");SetCadSystemVariable("ORTHOMODE",0);}if(s.AutoCloseSnap){osmode=CadSystemVariable("OSMODE");SetCadSystemVariable("OSMODE",0);}
@@ -181,7 +194,9 @@ namespace XAnnotation
                         s,
                         historyFirsts,
                         historySeconds);
-                    var regionResult = ed.Drag(region);
+                    PromptResult regionResult;
+                    try { regionResult = ed.Drag(region); }
+                    finally { PreviewTransient.Clear(); }
                     if (region.Aborted)
                     {
                         ed.WriteMessage("\n绘制选项已更改，本轮按新选项重新开始。");
@@ -816,6 +831,7 @@ namespace XAnnotation
         /// <paramref name="spaceId"/> 为空时写入当前空间；导入按原坐标还原时传入原批注所在布局的空间 Id。</summary>
         public static bool Create(Document doc, AnnotationData data, AnnotationSettings settings, Point3d firstPoint, Point3d secondPoint, Point3d textLocation, ObjectId spaceId = default(ObjectId))
         {
+            DrawingScale.Ensure(doc);
             using (doc.LockDocument()) using (var tr = doc.Database.TransactionManager.StartTransaction())
             {
                 EnsureRegApp(doc.Database, tr); EnsureLayer(doc.Database, tr, settings,data);
@@ -3171,9 +3187,10 @@ namespace XAnnotation
                 fixedAnchor);
             try
             {
-                var result = doc.Editor.Drag(jig);
-                return InteractionResult.From(
-                    result,
+                PromptResult result;
+                try { result = doc.Editor.Drag(jig); }
+                finally { PreviewTransient.Clear(); }
+                return InteractionResult.From(                    result,
                     "批注框定位",
                     jig.Current);
             }
@@ -3217,6 +3234,7 @@ namespace XAnnotation
             }
             finally
             {
+                PreviewTransient.Clear();
                 if (ortho != null) SetCadSystemVariable("ORTHOMODE", ortho);
                 if (osmode != null) SetCadSystemVariable("OSMODE", osmode);
             }
@@ -3454,6 +3472,21 @@ namespace XAnnotation
             var spaced = total * (lines <= 1 ? 1.0 : 1.7);
             return Math.Max(settings.TextHeight * 2.0, spaced);
         }
+        /// <summary>云线弧瓣弦长。未自适应时 = 2×半径（老算法）；自适应时按周长定瓣数，每瓣仍是 2×半径，
+        /// 只让数量随框大小增减。
+        /// <para>原来自适应是"按字高的 1.2 倍定瓣数、封顶 160 瓣"：字高一旦相对图面偏大（图形单位不是毫米的
+        /// 总图就是这种情况），瓣数被压到下限、每瓣又被拉得很长，画出来是一条大波浪而不是云线——
+        /// 这正是总图上"云线比例不对"的来源。改成按半径定，弧瓣永远和设置里的半径一致。</para></summary>
+        private static double CloudSpacing(double perimeter, AnnotationSettings settings, double fallback)
+        {
+            if(!settings.CloudAutoFit) return fallback;
+            var radius=Math.Max(settings.CloudRadius,1e-6);
+            var desired=(int)Math.Ceiling(perimeter/Math.Max(radius*2.0,1e-6));
+            if(desired<20)desired=20;
+            if(desired>400)desired=400;
+            return perimeter/desired;
+        }
+
         /// <summary>构建云线多段线，支持矩形/菱形/椭圆三种外形，开启 CloudAutoFit 时自适应弧段数。</summary>
         internal static Polyline BuildCloud(Point2d min, Point2d max, AnnotationSettings settings)
         {
@@ -3462,11 +3495,11 @@ namespace XAnnotation
             var perimeter=ComputePerimeter(w,h,settings.Shape);
             if(perimeter<1e-9){var empty=new Polyline();empty.AddVertexAt(0,min,0,0,0);empty.AddVertexAt(1,max,0,0,0);return empty;}
             var spacing=Math.Max(0.1,radius*2);
-            if(settings.CloudAutoFit){var desired=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/Math.Max(settings.TextHeight*1.2,0.1))));spacing=perimeter/desired;}
+            spacing=CloudSpacing(perimeter,settings,spacing);
             // 菱形：使用框选云线专用的四边细分，不进入 PL 多边形校验。
             if(settings.Shape=="菱形"){var cx=(min.X+max.X)/2;var cy=(min.Y+max.Y)/2;return BuildRegionCloudPath(new[]{new Point2d(cx,min.Y),new Point2d(max.X,cy),new Point2d(cx,max.Y),new Point2d(min.X,cy)},spacing,settings.CloudStyle,settings.LineWidth);}
             // 椭圆：自适应采样点数
-            if(settings.Shape=="椭圆"){var cx=(min.X+max.X)/2;var cy=(min.Y+max.Y)/2;var rx=w/2;var ry=h/2;var count=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/spacing)));var points=new List<Point2d>();for(var i=0;i<count;i++){var a=2*Math.PI*i/count;points.Add(new Point2d(cx+rx*Math.Cos(a),cy+ry*Math.Sin(a)));}return BuildScallopedVertices(points,settings.CloudStyle,settings.LineWidth);}
+            if(settings.Shape=="椭圆"){var cx=(min.X+max.X)/2;var cy=(min.Y+max.Y)/2;var rx=w/2;var ry=h/2;var count=Math.Max(20,Math.Min(400,(int)Math.Ceiling(perimeter/spacing)));var points=new List<Point2d>();for(var i=0;i<count;i++){var a=2*Math.PI*i/count;points.Add(new Point2d(cx+rx*Math.Cos(a),cy+ry*Math.Sin(a)));}return BuildScallopedVertices(points,settings.CloudStyle,settings.LineWidth);}
             // 矩形：按宽高分别均匀布点，与任意折点的 PL 云线算法完全分离。
             var nx=Math.Max(4,(int)Math.Ceiling(w/spacing));var ny=Math.Max(4,(int)Math.Ceiling(h/spacing));
             const int maxVertices=400;var total=2*(nx+ny);if(total>maxVertices){var scale=(double)maxVertices/total;nx=Math.Max(4,(int)Math.Floor(nx*scale));ny=Math.Max(4,(int)Math.Floor(ny*scale));}
@@ -3498,8 +3531,8 @@ namespace XAnnotation
                 var axisX=new Vector2d((corners[1].X-corners[0].X)/2,(corners[1].Y-corners[0].Y)/2);
                 var axisY=new Vector2d((corners[3].X-corners[0].X)/2,(corners[3].Y-corners[0].Y)/2);
                 var perimeter=Math.PI*(axisX.Length+axisY.Length)*1.05;var spacing=Math.Max(settings.CloudRadius*2,0.1);
-                if(settings.CloudAutoFit){var desired=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/Math.Max(settings.TextHeight*1.2,0.1))));spacing=perimeter/desired;}
-                var count=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/spacing)));var points=new List<Point2d>(count);
+                spacing=CloudSpacing(perimeter,settings,spacing);
+                var count=Math.Max(20,Math.Min(400,(int)Math.Ceiling(perimeter/spacing)));var points=new List<Point2d>(count);
                 for(var i=0;i<count;i++){var angle=2*Math.PI*i/count;points.Add(center+axisX*Math.Cos(angle)+axisY*Math.Sin(angle));}
                 return BuildScallopedVertices(points,settings.CloudStyle,settings.LineWidth);
             }
@@ -3513,7 +3546,7 @@ namespace XAnnotation
         {
             var spacing=Math.Max(settings.CloudRadius*2,0.1);
             var perimeter=0.0;for(var i=0;i<wcsCorners.Length;i++)perimeter+=wcsCorners[i].GetDistanceTo(wcsCorners[(i+1)%wcsCorners.Length]);
-            if(settings.CloudAutoFit){var desired=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/Math.Max(settings.TextHeight*1.2,0.1))));spacing=perimeter/desired;}
+            spacing=CloudSpacing(perimeter,settings,spacing);
             return BuildRegionCloudPath(wcsCorners,spacing,settings.CloudStyle,settings.LineWidth);
         }
 
@@ -3563,11 +3596,7 @@ namespace XAnnotation
             for(var i=0;i<corners.Count;i++){lengths[i]=corners[i].GetDistanceTo(corners[(i+1)%corners.Count]);perimeter+=lengths[i];}
 
             var spacing=Math.Max(settings.CloudRadius*2,0.1);
-            if(settings.CloudAutoFit)
-            {
-                var desired=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/Math.Max(settings.TextHeight*1.2,0.1))));
-                spacing=perimeter/desired;
-            }
+            spacing=CloudSpacing(perimeter,settings,spacing);
 
             var minimumPerEdge=corners.Count<=4?4:1;
             var segmentCounts=lengths.Select(length=>Math.Max(minimumPerEdge,(int)Math.Ceiling(length/spacing))).ToArray();

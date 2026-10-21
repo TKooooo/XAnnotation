@@ -283,6 +283,8 @@ namespace XAnnotation
                 {
                     try { AnnotationService.SyncNextNumber(doc); }
                     catch (System.Exception ex) { failedSteps.Add("SyncNextNumber"); PluginLog.Error("Initialize.SyncNextNumber", ex); }
+                    try { DrawingScale.Ensure(doc); }
+                    catch (System.Exception ex) { failedSteps.Add("DrawingScale"); PluginLog.Error("Initialize.DrawingScale", ex); }
                     try { ObserveDatabase(doc.Database); }
                     catch (System.Exception ex) { failedSteps.Add("ObserveDatabase"); PluginLog.Error("Initialize.ObserveDatabase", ex); }
                 }
@@ -351,6 +353,7 @@ namespace XAnnotation
                 // 布防途中切了图纸：作废本次双击，并把临时改掉的 QPMODE 还回去。
                 if (_doubleClickArmed) { DisarmDoubleClick(); RestoreQuickPropertiesMode(); }
                 AnnotationService.SyncNextNumber(e.Document);
+                DrawingScale.Ensure(e.Document);
                 ObserveDatabase(e.Document?.Database);
                 XAnnotation.Views.AnnotationPanel.HandleDocumentActivated(e.Document);
                 XAnnotation.Views.AnnotationListPanel.RefreshIfOpen();
