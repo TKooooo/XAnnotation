@@ -13,6 +13,7 @@ namespace XAnnotation.Views
         /// </summary>
         public AboutWindow()
         {
+            WpfHost.Ensure();
             InitializeComponent();
             Title = "关于 " + AppInfo.ProductName;
             ProductNameText.Text = AppInfo.ProductName;

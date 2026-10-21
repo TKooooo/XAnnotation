@@ -234,6 +234,8 @@ namespace XAnnotation.Views
 
         private AnnotationPanel()
         {
+            // 防"关掉最后一个插件窗口 → 宿主 WPF Application 被自动关闭 → 之后再也弹不出窗口"，见 WpfHost。
+            WpfHost.Ensure();
             InitializeComponent();
             // 登记为"置顶漂浮窗口"：弹模态窗口（批注内容窗等）时会被临时降为普通窗口，
             // 否则模态窗会躲在本面板后面（两个 Topmost 窗口相互不能盖住）。
@@ -1289,7 +1291,7 @@ namespace XAnnotation.Views
                 _instance = null;
                 PluginLog.Error("AnnotationPanel.ShowOrActivate", ex);
                 var doc = CadApplication.DocumentManager.MdiActiveDocument;
-                doc?.Editor.WriteMessage("\n打开批注功能选择框失败: " + ex.Message);
+                doc?.Editor.WriteMessage("\n打开批注功能选择框失败: " + WpfHost.Describe(ex));
             }
         }
 

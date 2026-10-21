@@ -86,6 +86,7 @@ namespace XAnnotation.Views
         /// <summary>构造设置窗口。textStyles 为当前 DWG 中可用的文字样式名列表。</summary>
         public SettingsWindow(AnnotationSettings value, IEnumerable<string> textStyles = null)
         {
+            WpfHost.Ensure();
             InitializeComponent();
             // 登记为"置顶漂浮窗口"：弹模态窗口（批注内容窗等）时会被临时降为普通窗口，否则会把它盖住。
             CadDialog.RegisterFloating(this);

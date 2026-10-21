@@ -25,6 +25,7 @@ namespace XAnnotation.Views
 
         private AnnotationListPanel()
         {
+            WpfHost.Ensure();
             InitializeComponent();
             CadDialog.RegisterFloating(this);
             Loaded += (_, __) =>

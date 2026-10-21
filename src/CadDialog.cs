@@ -30,6 +30,9 @@ namespace XAnnotation
     {
         public static bool? ShowModal(Window window)
         {
+            // 兜底再确认一次宿主 WPF Application 的 ShutdownMode（构造期已确认过一次，见 WpfHost）：
+            // 宿主的 Application 有可能是在本插件加载之后才建出来的，那时构造期的守护是空跑。
+            WpfHost.Ensure();
             // 挂主窗口失败不应阻断弹窗：仅记日志，继续走后续流程（窗口会退回居中屏幕显示）。
             try { AttachToCadMainWindow(window); }
             catch (Exception ex) { PluginLog.Error("WPF.AttachToCadMainWindow", ex); }
@@ -60,6 +63,7 @@ namespace XAnnotation
         public static void ShowModeless(Window window)
         {
             if (window == null) return;
+            WpfHost.Ensure();
             try { AttachToCadMainWindow(window); }
             catch (Exception ex) { PluginLog.Error("WPF.AttachToCadMainWindow", ex); }
             window.Show();

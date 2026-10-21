@@ -259,6 +259,11 @@ namespace XAnnotation
                 // 环境快照先落地：哪怕是"加载到一半炸了"，也已经留下可判断的现场信息。
                 LogEnvironment();
 
+                // 宿主 WPF Application 的守护必须排在所有建窗动作之前：把 ShutdownMode 改成
+                // OnExplicitShutdown，否则本插件最后一个窗口关闭时 WPF 会自动关掉宿主的 Application，
+                // 之后本次 CAD 会话内所有窗口都加载不出来（"应用程序对象正在关闭"）。详见 WpfHost。
+                Step(failedSteps, "WpfHost", () => { WpfHost.Ensure(); });
+
                 Step(failedSteps, "BeginDoubleClick", () => CadApplication.BeginDoubleClick += OnBeginDoubleClick);
                 Step(failedSteps, "DocumentActivated", () => CadApplication.DocumentManager.DocumentActivated += OnDocumentActivated);
                 // 双击编辑真正生效靠这两个事件：拦下原生命令 + 被拦之后执行自己的命令。见类顶部注释。
