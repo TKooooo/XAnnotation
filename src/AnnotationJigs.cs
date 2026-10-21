@@ -580,7 +580,10 @@ namespace XAnnotation
             RegionPreviewDrawing.DrawHistory(draw,_bulgeSign,_ucsToWcs,_wcsToUcs,_source,_historyFirsts,_historySeconds);
             var first=_first.TransformBy(_wcsToUcs);var current=_current.TransformBy(_wcsToUcs);var w=Math.Abs(current.X-first.X);var h=Math.Abs(current.Y-first.Y);if(w<1e-8||h<1e-8)return true;
             var settings=AnnotationService.ResolveEffectiveSettings(_doc,_source,new AnnotationData(),Math.Sqrt(w*w+h*h));
-            using(var cloud=AnnotationService.BuildCloud(ToMin(first,current),ToMax(first,current),settings)){AnnotationService.ApplyPreviewAppearance(cloud,settings,settings.CloudColor,"cloud");cloud.Elevation=first.Z;cloud.TransformBy(_ucsToWcs);AnnotationService.OrientCloudBulges(cloud,_bulgeSign);RegionPreviewDrawing.DrawWidePolyline(draw,cloud,RegionPreviewDrawing.SafePolylineWidth(cloud));}return true;
+            using(var cloud=AnnotationService.BuildCloud(ToMin(first,current),ToMax(first,current),settings)){AnnotationService.ApplyPreviewAppearance(cloud,settings,settings.CloudColor,"cloud");cloud.Elevation=first.Z;cloud.TransformBy(_ucsToWcs);AnnotationService.OrientCloudBulges(cloud,_bulgeSign);RegionPreviewDrawing.DrawWidePolyline(draw,cloud,RegionPreviewDrawing.SafePolylineWidth(cloud));
+                // 同一份云线再交给瞬态层画一遍（不透明）：Jig 的拖拽管线会把上面那份按 50% 与背景合成，
+                // 而瞬态图形不走那条管线，盖在上面就是全色。Jig 的那份保留作兜底。
+                if(PreviewTransient.Enabled) PreviewTransient.Replace((CadPolyline)cloud.Clone());}return true;
         }
         internal static Point2d ToMin(Point3d a,Point3d b)=>new Point2d(Math.Min(a.X,b.X),Math.Min(a.Y,b.Y));internal static Point2d ToMax(Point3d a,Point3d b)=>new Point2d(Math.Max(a.X,b.X),Math.Max(a.Y,b.Y));
     }
@@ -781,6 +784,10 @@ namespace XAnnotation
             // 拖拽管线默认不填充、且按 50% 透明度合成（看起来就是"淡显"）——见 PreparePreviewTraits 的说明。
             RegionPreviewDrawing.PreparePreviewTraits(draw);
 
+            // 每帧收集"要额外交给瞬态层画一份不透明副本"的实体：Jig 的 drag image 会被按 50% 合成，
+            // 瞬态层不会，盖上去就恢复全色。Jig 自己那份照样画，作为兜底。
+            var overlays = PreviewTransient.Enabled ? new List<Entity>() : null;
+
             var localText = _current.TransformBy(_wcsToUcs);
             var boxCorners = BuildBoxCorners(localText);
 
@@ -790,6 +797,7 @@ namespace XAnnotation
                 {
                     // 宽多段线在世界绘制里不出带宽，须显式展开成实心带，否则拖拽时看着是细线/淡显。
                     RegionPreviewDrawing.DrawWidePolyline(draw, part.Cloud, RegionPreviewDrawing.SafePolylineWidth(part.Cloud));
+                    if (overlays != null) overlays.Add((CadPolyline)part.Cloud.Clone());
                 }
                 catch (System.Exception ex) { LogDrawFailure("cloud", ex); }
 
@@ -804,6 +812,7 @@ namespace XAnnotation
                         AnnotationService.ApplyPreviewAppearance(leader, part.Settings, part.Settings.LeaderColor, "leader");
                         leader.TransformBy(_ucsToWcs);
                         RegionPreviewDrawing.DrawWidePolyline(draw, leader, RegionPreviewDrawing.SafePolylineWidth(leader));
+                        if (overlays != null) overlays.Add((CadPolyline)leader.Clone());
                     }
                 }
                 catch (System.Exception ex) { LogDrawFailure("leader", ex); }
@@ -822,6 +831,7 @@ namespace XAnnotation
                         AnnotationService.ApplyPreviewAppearance(leader, _settings, _settings.LeaderColor, "leader");
                         leader.TransformBy(_ucsToWcs);
                         RegionPreviewDrawing.DrawWidePolyline(draw, leader, RegionPreviewDrawing.SafePolylineWidth(leader));
+                        if (overlays != null) overlays.Add((CadPolyline)leader.Clone());
                     }
                 }
                 catch (System.Exception ex) { LogDrawFailure("baseLeader", ex); }
@@ -839,6 +849,7 @@ namespace XAnnotation
                             AnnotationService.ApplyPreviewAppearance(marker, _settings, _settings.LeaderColor, "leader");
                             marker.TransformBy(_ucsToWcs);
                             RegionPreviewDrawing.DrawWidePolyline(draw, marker, RegionPreviewDrawing.SafePolylineWidth(marker));
+                            if (overlays != null) overlays.Add((CadPolyline)marker.Clone());
                         }
                     }
                 }
@@ -853,6 +864,7 @@ namespace XAnnotation
                     AnnotationService.ApplyPreviewAppearance(box, _settings, _boxColor, "box");
                     box.TransformBy(_ucsToWcs);
                     draw.Geometry.Draw(box);
+                    if (overlays != null) overlays.Add((CadPolyline)box.Clone());
                 }
             }
             catch (System.Exception ex) { LogDrawFailure("box", ex); }
@@ -871,6 +883,9 @@ namespace XAnnotation
                 }
             }
             catch (System.Exception ex) { LogDrawFailure("text", ex); }
+
+            // 统一把这一帧的副本交给瞬态层（不透明）；上一帧的由 Replace 内部擦除释放。
+            if (overlays != null) PreviewTransient.Replace(overlays.ToArray());
 
             return true;
         }
