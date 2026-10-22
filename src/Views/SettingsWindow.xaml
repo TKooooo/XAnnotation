@@ -3,6 +3,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="X-批注设置" Width="640" Height="540"
+        WindowStartupLocation="CenterScreen"
         MinWidth="560" MinHeight="440"
         ResizeMode="CanResizeWithGrip"
         Topmost="True" ShowInTaskbar="False"
@@ -11,6 +12,10 @@
         <ResourceDictionary Source="../Themes/XTheme.xaml"/>
     </Window.Resources>
 
+    <!-- 表单列宽约定：左侧标签列固定 120，右侧输入列固定 120（下拉/输入框不再随窗口变宽而拉长）。
+         120 足够显示设置里的实际内容（颜色「255  255」+色块、比例 1:1000、图层名、字高等）；
+         标签仍是右对齐贴着输入框、行高由控件自身 MinHeight 决定，所以窗口拉宽只会让右侧留白变多，
+         对齐关系与高度都不变。 -->
     <DockPanel>
         <!-- 底部按钮栏。
              注意：这是**非模态**窗口，按钮上不能写 IsCancel / IsDefault —— 那是"对话框"语义，
@@ -34,7 +39,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -52,7 +57,7 @@
                             <TextBlock Grid.Row="3" Grid.Column="0" Text="云线线宽(mm)" Style="{StaticResource FieldLabel}"/>
                             <TextBox x:Name="LineWidthText" Grid.Row="3" Grid.Column="1"/>
                         </Grid>
-                        <CheckBox x:Name="CloudAutoFitCheck" Content="云线自适应"
+                        <CheckBox x:Name="CloudAutoFitCheck" Content="云线自适应（框选越大只增加瓣数，弧瓣大小仍按比例）"
                                   Checked="Dependency_Changed" Unchecked="Dependency_Changed" Margin="120,4,0,2"/>
 
                         <Rectangle Style="{StaticResource SectionSeparator}"/>
@@ -61,7 +66,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -99,7 +104,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -120,7 +125,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="固定宽度值" Style="{StaticResource FieldLabel}"/>
                             <TextBox x:Name="FixedWidthValueText" Grid.Column="1"/>
@@ -132,7 +137,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -172,7 +177,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -202,7 +207,7 @@
                         <Grid Margin="0,4,0,0">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -240,7 +245,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -259,7 +264,7 @@
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="120"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -285,8 +290,9 @@
                         <TextBlock Style="{StaticResource Caption}" Margin="0,0,0,10">
                             • 设置保存在本机（%AppData%\XAnnotation\settings.xml）<LineBreak/>
                             • 批注数据编码后存储在 DWG 图形内，随图纸传递<LineBreak/>
-                            • 启用字体自适应后，字高按云线对角线尺寸 × 百分比自动计算<LineBreak/>
-                            • 未启用自适应时按比例换算：字高 = 打印字高(mm) × N，云线半径 = 打印云线半径(mm) × N（选比例不会再自动取消自适应）<LineBreak/>
+                            • 云线弧瓣始终按图面比例换算：半径 = 打印半径(mm) × N，框选范围只决定瓣数（总图上不会变成大波浪）<LineBreak/>
+                            • N 优先按图内文字字高自动识别（米制总图也能算对）；识别不到时才用上面的比例选型<LineBreak/>
+                            • 启用字体自适应后，字高按云线对角线尺寸 × 百分比自动计算；未启用时字高 = 打印字高(mm) × N<LineBreak/>
                             • 创建命令执行时，命令行会显示本次实际采用的字高和云线半径
                         </TextBlock>
 

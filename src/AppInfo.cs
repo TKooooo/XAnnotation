@@ -18,13 +18,13 @@ namespace XAnnotation
         public const string Email = "";
 
         /// <summary>QQ 群号。留空表示不填 / 不展示。</summary>
-        public const string QqGroup = "";
+        public const string QqGroup = "1128105014";
 
         /// <summary>
-        /// 关于框最下方的来源声明（含原始作者署名，请勿删除）。
+        /// 关于框最下方的来源声明（含原始项目出处，请勿删除）。
         /// </summary>
         public const string Credit =
-            "本插件由“爱德华hehe”的“GM批注”修改而来，感谢“爱德华hehe”的无私奉献。";
+            "本插件基于“GM批注”修改，https://github.com/Edwardhehe/CADLAAnnotation";
 
         /// <summary>
         /// 从当前程序集读取版本号并格式化为带 V 前缀的显示文本。

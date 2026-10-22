@@ -1,9 +1,9 @@
-# X-批注 v1.0.2
+﻿# X-批注 v1.0.5
 
 同时支持 AutoCAD、中望 ZWCAD 与浩辰 GstarCAD 的本地批注插件，无需登录或联网。多个宿主共用同一套源码、DWG 数据格式、界面和命令。
 
 > **来源声明**  
-> 本插件由「爱德华hehe」的 **GM批注** 修改而来，感谢「爱德华hehe」的无私奉献。
+> 本插件基于「GM批注」修改，https://github.com/Edwardhehe/CADLAAnnotation 。
 >
 > **与 GM批注 的关系（两份可同机共存）**
 >

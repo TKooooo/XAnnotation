@@ -128,7 +128,7 @@ namespace XAnnotation
             }
             catch (System.Exception ex)
             {
-                doc.Editor.WriteMessage("\n绘制批注失败: " + ex.Message);
+                doc.Editor.WriteMessage("\n绘制批注失败: " + WpfHost.Describe(ex));
                 PluginLog.Error("X_PZ_DRAW", ex);
             }
         }
@@ -417,7 +417,7 @@ namespace XAnnotation
                 var window = new Views.HistoryWindow(drawing);
                 CadDialog.ShowModal(window);
             }
-            catch (System.Exception ex) { doc.Editor.WriteMessage("\n打开批注历史失败: " + ex.Message); PluginLog.Error("X_PZ_HISTORY", ex); }
+            catch (System.Exception ex) { doc.Editor.WriteMessage("\n打开批注历史失败: " + WpfHost.Describe(ex)); PluginLog.Error("X_PZ_HISTORY", ex); }
         }
 
         /// <summary>打开知识库窗口：批注条目 + 常用批注语。
@@ -431,7 +431,7 @@ namespace XAnnotation
                 var window = new Views.KnowledgeWindow();
                 CadDialog.ShowModal(window);
             }
-            catch (System.Exception ex) { doc.Editor.WriteMessage("\n打开知识库失败: " + ex.Message); PluginLog.Error("X_PZ_KB", ex); }
+            catch (System.Exception ex) { doc.Editor.WriteMessage("\n打开知识库失败: " + WpfHost.Describe(ex)); PluginLog.Error("X_PZ_KB", ex); }
         }
 
         /// <summary>修复复制/粘贴后的批注：全图扫描脱离编组的批注实体，重建编组并恢复识别。</summary>
@@ -755,7 +755,7 @@ namespace XAnnotation
                 AnnotationListPanel.RefreshIfOpen();
                 doc.Editor.WriteMessage("\nX-批注已更新: " + data.Number); return true;
             }
-            catch (System.Exception ex) { doc.Editor.WriteMessage("\n编辑失败: " + ex.Message); return false; }
+            catch (System.Exception ex) { doc.Editor.WriteMessage("\n编辑失败: " + WpfHost.Describe(ex)); return false; }
         }
     }
 }

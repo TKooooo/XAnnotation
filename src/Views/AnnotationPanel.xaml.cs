@@ -234,6 +234,8 @@ namespace XAnnotation.Views
 
         private AnnotationPanel()
         {
+            // 防"关掉最后一个插件窗口 → 宿主 WPF Application 被自动关闭 → 之后再也弹不出窗口"，见 WpfHost。
+            WpfHost.Ensure();
             InitializeComponent();
             // 登记为"置顶漂浮窗口"：弹模态窗口（批注内容窗等）时会被临时降为普通窗口，
             // 否则模态窗会躲在本面板后面（两个 Topmost 窗口相互不能盖住）。
@@ -1289,7 +1291,7 @@ namespace XAnnotation.Views
                 _instance = null;
                 PluginLog.Error("AnnotationPanel.ShowOrActivate", ex);
                 var doc = CadApplication.DocumentManager.MdiActiveDocument;
-                doc?.Editor.WriteMessage("\n打开批注功能选择框失败: " + ex.Message);
+                doc?.Editor.WriteMessage("\n打开批注功能选择框失败: " + WpfHost.Describe(ex));
             }
         }
 
@@ -1829,14 +1831,14 @@ namespace XAnnotation.Views
         /// 点谁谁在前（<see cref="WpfWindowUtil.BringToTop"/>）。
         /// <para>原先走的是 CAD 原生模态 <c>ShowModalWindow</c>：模态会禁用其它顶层窗口，
         /// 于是设置窗口一开，面板既点不动、也不能单独关，必须先退出设置窗口 —— 正是要修掉的问题。</para>
-        /// <para>新窗口摆在面板右侧（面板固定在屏幕左上角），两个窗口同时可见。</para></summary>
+        /// <para>位置由设置窗口自己决定：默认居中于显示器（见 <see cref="CadDialog.CenterOnMonitor"/>）。</para></summary>
         private void Settings_Click(object sender, RoutedEventArgs e)
         {
             try
             {
                 var doc = CadApplication.DocumentManager.MdiActiveDocument;
                 var styles = GetTextStyles(doc);
-                var w = SettingsWindow.ShowOrActivate(_s, styles, this);
+                var w = SettingsWindow.ShowOrActivate(_s, styles);
                 if (w == null) return;
 
                 // 订阅"保存后刷新面板"，同一窗口只订一次（窗口被复用时不重复挂钩子）。
