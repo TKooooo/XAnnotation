@@ -157,6 +157,25 @@ namespace XAnnotation
             firstPoint=Point3d.Origin;secondPoint=Point3d.Origin;var ed=doc.Editor;object ortho=null,osmode=null;
             try{
                 if(s.AutoCloseOrtho){ortho=CadSystemVariable("ORTHOMODE");SetCadSystemVariable("ORTHOMODE",0);}if(s.AutoCloseSnap){osmode=CadSystemVariable("OSMODE");SetCadSystemVariable("OSMODE",0);}
+                // 本轮"已经确认过"的云线交给瞬态层画：留在 Jig 的 WorldDraw 里画会被拖拽管线
+                // 按 50% 透明度合成，用户看到的就是"刚画完的云线又变成淡显"。瞬态图形不走那条管线，
+                // 是纯实色。这里一次建好，拖拽期间不再碰数据库/编辑器（WorldDraw 里不允许）。
+                if(PreviewTransient.Enabled&&historyFirsts!=null&&historySeconds!=null&&historyFirsts.Count>0)
+                {
+                    var historyUcsToWcs=GetUcsMatrix(doc);
+                    PreviewTransient.SetHistory(RegionPreviewDrawing.BuildHistory(
+                        doc,
+                        CloudBulgeSign(doc,Vector3d.ZAxis.TransformBy(historyUcsToWcs)),
+                        historyUcsToWcs,
+                        historyUcsToWcs.Inverse(),
+                        s,
+                        historyFirsts,
+                        historySeconds).ToArray());
+                    // 瞬态图形要等下一次屏幕刷新才画出来；这里主动刷一次，免得"刚确认的云线"
+                    // 在下一个提示挂起、用户还没动鼠标时看着像是没画。
+                    try { ed.UpdateScreen(); }
+                    catch (System.Exception ex) { PluginLog.Warning("PromptCloud.UpdateScreen", ex.Message); }
+                }
                 while(true)
                 {
                     Point3d firstWcs;
@@ -225,7 +244,7 @@ namespace XAnnotation
                     }
                     firstPoint=firstWcs;secondPoint=region.Current;return CloudPromptResult.Completed;
                 }
-            }finally{if(ortho!=null)SetCadSystemVariable("ORTHOMODE",ortho);if(osmode!=null)SetCadSystemVariable("OSMODE",osmode);}
+            }finally{PreviewTransient.ClearHistory();if(ortho!=null)SetCadSystemVariable("ORTHOMODE",ortho);if(osmode!=null)SetCadSystemVariable("OSMODE",osmode);}
         }
 
         /// <summary>仅创建云线（不含文字、引线、边框），返回实体 ObjectId。</summary>

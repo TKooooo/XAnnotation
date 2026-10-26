@@ -355,13 +355,74 @@ namespace XAnnotation
             return result;
         }
 
-        /// <summary>重绘"已经确认过的"云线范围（多对一/仅绘云线时给用户看进度）。
-        /// <para><paramref name="doc"/> 只用来读 <see cref="DrawingScale"/> 的缓存值（纯静态字段，不碰数据库），
+        /// <summary>构造"本轮已确认过的"云线（多对一 / 连续仅绘云线时给用户看进度）。
+        /// <para>返回的是<b>WCS 下的真实实体</b>（已按图面比例解析尺寸、已设好颜色线宽），调用方负责释放。
+        /// 正常走 <see cref="PreviewTransient.SetHistory"/> 交给瞬态层画——瞬态图形不经过拖拽合成，
+        /// 是纯实色；若仍留在 Jig 的 WorldDraw 里画，就会被打上 50% 透明度，于是"已经画完的云线"看起来淡显。</para>
+        /// <para><paramref name="doc"/> 只用来读 <see cref="DrawingScale"/> 的缓存值（纯静态字段），
         /// 保证历史云线预览与最终落图用同一套图面比例。</para>
-        /// <para><b>本方法在 WorldDraw 里调用，绝不能访问数据库或编辑器</b>：原先每画一条历史云线就调一次
-        /// <c>OrientCloudBulgesForView</c>（内含 <c>Editor.GetCurrentView()</c>），多对一时就是"每帧 × 每条"
-        /// 的编辑器访问量，AutoCAD 会直接丢弃这些帧——表现就是多对一拖拽时预览闪烁/卡顿。
-        /// 现在弧瓣朝向由调用方在拖拽开始前问一次，通过 <paramref name="bulgeSign"/> 传进来。</para></summary>
+        /// <para><b>不能在 WorldDraw 里调用</b>：这里会解析尺寸（可能问视图）。现在由
+        /// <c>PromptCloud</c> 在每轮开始前调一次，拖拽期间不再碰数据库/编辑器。</para></summary>
+        internal static List<Entity> BuildHistory(
+            Document doc,
+            double bulgeSign,
+            Matrix3d ucsToWcs,
+            Matrix3d wcsToUcs,
+            AnnotationSettings source,
+            IList<Point3d> firsts,
+            IList<Point3d> seconds)
+        {
+            var result = new List<Entity>();
+            if (firsts == null || seconds == null) return result;
+
+            try
+            {
+                for (var i = 0; i < firsts.Count && i < seconds.Count; i++)
+                {
+                    var a = firsts[i].TransformBy(wcsToUcs);
+                    var b = seconds[i].TransformBy(wcsToUcs);
+                    var diagonal = Math.Sqrt(
+                        Math.Pow(b.X - a.X, 2) +
+                        Math.Pow(b.Y - a.Y, 2));
+                    // 对角线为 0 会让 ResolveEffectiveSettings 去问视图——这里直接跳过这一条。
+                    if (diagonal <= 0) continue;
+                    var settings = AnnotationService.ResolveEffectiveSettings(
+                        doc,
+                        source,
+                        null,
+                        diagonal);
+                    var cloud = AnnotationService.BuildCloud(
+                        RegionPreviewJig.ToMin(a, b),
+                        RegionPreviewJig.ToMax(a, b),
+                        settings);
+                    AnnotationService.ApplyPreviewAppearance(
+                        cloud,
+                        settings,
+                        settings.CloudColor,
+                        "cloud");
+                    cloud.Elevation = a.Z;
+                    cloud.TransformBy(ucsToWcs);
+                    AnnotationService.OrientCloudBulges(cloud, bulgeSign);
+                    result.Add(cloud);
+                }
+            }
+            catch (Exception ex)
+            {
+                // 半路失败：已建好的由调用方按"返回即拥有"的约定释放，这里先释放，避免泄漏。
+                PluginLog.Warning("RegionPreviewDrawing.BuildHistory", ex.Message);
+                foreach (var entity in result)
+                {
+                    try { entity.Dispose(); }
+                    catch (Exception) { }
+                }
+                result.Clear();
+            }
+
+            return result;
+        }
+
+        /// <summary>在 Jig 的 WorldDraw 里重绘历史云线——<b>仅当瞬态层不可用时</b>的兜底
+        /// （WorldDraw 这条路必然被拖拽管线按 50% 淡化，正常不该走）。</summary>
         internal static void DrawHistory(
             WorldDraw draw,
             Document doc,
@@ -372,36 +433,19 @@ namespace XAnnotation
             IList<Point3d> firsts,
             IList<Point3d> seconds)
         {
-            for (var i = 0; i < firsts.Count && i < seconds.Count; i++)
+            var entities = BuildHistory(doc, bulgeSign, ucsToWcs, wcsToUcs, source, firsts, seconds);
+            foreach (var entity in entities)
             {
-                var a = firsts[i].TransformBy(wcsToUcs);
-                var b = seconds[i].TransformBy(wcsToUcs);
-                var diagonal = Math.Sqrt(
-                    Math.Pow(b.X - a.X, 2) +
-                    Math.Pow(b.Y - a.Y, 2));
-                // 对角线为 0 会让 ResolveEffectiveSettings 去问视图——拖拽期间不允许，直接跳过这一条。
-                if (diagonal <= 0) continue;
-                var settings = AnnotationService.ResolveEffectiveSettings(
-                    doc,
-                    source,
-                    null,
-                    diagonal);
-                using (var cloud = AnnotationService.BuildCloud(
-                    RegionPreviewJig.ToMin(a, b),
-                    RegionPreviewJig.ToMax(a, b),
-                    settings))
+                var cloud = entity as CadPolyline;
+                try
                 {
-                    AnnotationService.ApplyPreviewAppearance(
-                        cloud,
-                        settings,
-                        settings.CloudColor,
-                        "cloud");
-                    cloud.Elevation = a.Z;
-                    cloud.TransformBy(ucsToWcs);
-                    // 用预先算好的翻转量，WorldDraw 里不再问视图。
-                    AnnotationService.OrientCloudBulges(cloud, bulgeSign);
                     // 世界绘制不带带宽，须显式展开成实心带（否则历史云线同拖拽预览一样淡显）。
-                    DrawWidePolyline(draw, cloud, SafePolylineWidth(cloud));
+                    if (cloud != null) DrawWidePolyline(draw, cloud, SafePolylineWidth(cloud));
+                }
+                finally
+                {
+                    try { entity.Dispose(); }
+                    catch (Exception) { }
                 }
             }
         }
@@ -549,15 +593,20 @@ namespace XAnnotation
         protected override bool WorldDraw(WorldDraw draw)
         {
             RegionPreviewDrawing.PreparePreviewTraits(draw);
-            RegionPreviewDrawing.DrawHistory(
-                draw,
-                _doc,
-                _bulgeSign,
-                _ucsToWcs,
-                _wcsToUcs,
-                _source,
-                _firsts,
-                _seconds);
+            // 历史云线正常已交给瞬态层（纯实色）。这里只做兜底：留在 WorldDraw 里画的话，
+            // 会被拖拽管线按 50% 透明度合成，表现就是"已经画完的云线又变成淡显"。
+            if (!PreviewTransient.Enabled)
+            {
+                RegionPreviewDrawing.DrawHistory(
+                    draw,
+                    _doc,
+                    _bulgeSign,
+                    _ucsToWcs,
+                    _wcsToUcs,
+                    _source,
+                    _firsts,
+                    _seconds);
+            }
             return true;
         }
     }
@@ -581,7 +630,7 @@ namespace XAnnotation
         protected override bool WorldDraw(WorldDraw draw)
         {
             RegionPreviewDrawing.PreparePreviewTraits(draw);
-            RegionPreviewDrawing.DrawHistory(draw,_doc,_bulgeSign,_ucsToWcs,_wcsToUcs,_source,_historyFirsts,_historySeconds);
+            if(!PreviewTransient.Enabled)RegionPreviewDrawing.DrawHistory(draw,_doc,_bulgeSign,_ucsToWcs,_wcsToUcs,_source,_historyFirsts,_historySeconds);
             var first=_first.TransformBy(_wcsToUcs);var current=_current.TransformBy(_wcsToUcs);var w=Math.Abs(current.X-first.X);var h=Math.Abs(current.Y-first.Y);if(w<1e-8||h<1e-8)return true;
             var settings=AnnotationService.ResolveEffectiveSettings(_doc,_source,new AnnotationData(),Math.Sqrt(w*w+h*h));
             using(var cloud=AnnotationService.BuildCloud(ToMin(first,current),ToMax(first,current),settings)){AnnotationService.ApplyPreviewAppearance(cloud,settings,settings.CloudColor,"cloud");cloud.Elevation=first.Z;cloud.TransformBy(_ucsToWcs);AnnotationService.OrientCloudBulges(cloud,_bulgeSign);RegionPreviewDrawing.DrawWidePolyline(draw,cloud,RegionPreviewDrawing.SafePolylineWidth(cloud));
