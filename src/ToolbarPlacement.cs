@@ -87,7 +87,8 @@ namespace XAnnotation
             }
         }
 
-        /// <summary>两份记录是否等价。停靠时只看方向；浮动时连坐标与行数一起比。
+        /// <summary>两份记录是否等价。方向之外，坐标与行数也一起比 —— 用户在同一个停靠区里
+        /// 上下拖动（列内偏移变了）也要能记下来。
         /// <para>坐标用**完全相等**判定而不是"差 1 像素也算一样"：值都是直接从 AutoCAD 读回来的整数，
         /// 不存在抖动；而 <c>Math.Abs(Left - other.Left)</c> 在 <see cref="int.MinValue"/>（没读到）参与运算时
         /// 会溢出抛异常 —— 这个比较跑在 CAD 的 Idle 回调里，抛出去就是致命错误。</para></summary>
@@ -95,15 +96,20 @@ namespace XAnnotation
         {
             if (other == null) return false;
             if (Dock != other.Dock) return false;
-            if (Dock != 4) return true;   // 停靠时只看方向，坐标/行数没有意义
-            return Left == other.Left && Top == other.Top && Rows == other.Rows;
+            if (Left != other.Left || Top != other.Top) return false;
+            return Rows == other.Rows;
         }
 
         public string Describe()
         {
             var names = new[] { "顶部横排", "底部横排", "左侧竖排", "右侧竖排", "浮动" };
             var name = Dock >= 0 && Dock < names.Length ? names[Dock] : "未记录";
-            if (Dock == 4) name += "(" + Left + "," + Top + " / " + Rows + " 行)";
+            if (Left != int.MinValue || Top != int.MinValue)
+            {
+                name += "(x=" + (Left == int.MinValue ? "?" : Left.ToString(CultureInfo.InvariantCulture))
+                     + ",y=" + (Top == int.MinValue ? "?" : Top.ToString(CultureInfo.InvariantCulture)) + ")";
+            }
+            if (Dock == 4) name += "/" + Rows + " 行";
             return name;
         }
 

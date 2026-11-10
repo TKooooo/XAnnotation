@@ -450,6 +450,7 @@ namespace XAnnotation
 
             if (TryDock(toolbar, saved.Dock))
             {
+                TryRestoreOffset(toolbar, saved);
                 PluginLog.Info("Toolbar.Placement", "按上次摆放恢复：" + saved.Describe() + "。");
                 return true;
             }
@@ -457,6 +458,35 @@ namespace XAnnotation
             // 记录里的方向在这个宿主上摆不动：退回默认，别留在半空。
             PluginLog.Warning("Toolbar.Placement", "按记录摆放失败，回到默认底部横排。");
             return TryDock(toolbar, DefaultDock);
+        }
+
+        /// <summary>停靠之后，再把"停靠区里的偏移"摆一次。
+        /// <para><b>为什么需要这一步</b>：AutoCAD 对运行时建的工具栏是"重新插入"，<c>Dock(n)</c> 一律插到
+        /// 该停靠区的<b>最前面（顶部）</b> —— 用户把工具条拖到左列中部，重启后就跑到最上面
+        /// （用户 2026-11-10 反馈的现场：同一条左列，位置从 y≈575 变成 y≈50）。
+        /// ActiveX 没有"停靠顺序 / 列内偏移"的接口，唯一可能有效的就是直接写 <c>Left/Top</c>：
+        /// 这里写一次并把<b>读回值</b>记进日志 —— 宿主认就用上，不认也顶多还是顶部，不会更糟。</para>
+        /// <para>只写与停靠方向一致的那一个分量（左/右列看 <c>Top</c>，上/下排看 <c>Left</c>），
+        /// 免得两个一起写把工具条挪出停靠区。</para></summary>
+        private static void TryRestoreOffset(object toolbar, ToolbarPlacement saved)
+        {
+            if (toolbar == null || saved == null) return;
+            var vertical = saved.Dock == DockLeft || saved.Dock == DockRight;
+            var name = vertical ? "Top" : "Left";
+            var value = vertical ? saved.Top : saved.Left;
+            if (value == int.MinValue) return;
+
+            try
+            {
+                toolbar.GetType().InvokeMember(name, BindingFlags.SetProperty, null, toolbar, new object[] { value });
+                TryReadInt(toolbar, name, out var applied);
+                PluginLog.Info("Toolbar.Placement",
+                    name + " 偏移还原：写入 " + value + "，读回 " + applied + "（读回不同＝宿主不认列内偏移）。");
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("Toolbar.Placement.Offset", name + " 写入失败：" + Describe(ex));
+            }
         }
 
         /// <summary>把工具栏停靠到指定方向；失败返回 <c>false</c>（不冒泡）。
@@ -537,13 +567,12 @@ namespace XAnnotation
                 _placementWatchFailures = 0;
 
                 var placement = new ToolbarPlacement { Dock = dock, Rows = 1 };
-                if (dock == DockFloating)
-                {
-                    // 浮动坐标只用于记录/日志：浮动状态还原不了（见 ApplySavedPlacement 的说明）。
-                    if (TryReadInt(toolbar, "Left", out var left)) placement.Left = left;
-                    if (TryReadInt(toolbar, "Top", out var top)) placement.Top = top;
-                    if (TryReadInt(toolbar, "FloatingRows", out var rows) && rows > 0) placement.Rows = rows;
-                }
+                // 停靠时也把 Left/Top 读下来：AutoCAD 对停靠中的工具条一般只回 0，但万一是
+                // "列内偏移"就能拿来还原（见 TryRestoreOffset）；读不到就保持"未知"。
+                if (TryReadInt(toolbar, "Left", out var left)) placement.Left = left;
+                if (TryReadInt(toolbar, "Top", out var top)) placement.Top = top;
+                if (dock == DockFloating && TryReadInt(toolbar, "FloatingRows", out var rows) && rows > 0)
+                    placement.Rows = rows;
 
                 if (!force && _knownPlacement != null && _knownPlacement.SameAs(placement))
                 {
