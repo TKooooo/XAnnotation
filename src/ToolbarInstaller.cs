@@ -70,6 +70,46 @@ namespace XAnnotation
         private static int _retryCount;
         private static DateTime _lastRetryUtc = DateTime.MinValue;
 
+        // ===== 摆放（停靠方向 / 浮动位置）=====
+
+        /// <summary>停靠状态常量（AutoCAD ActiveX <c>AcToolbarDockStatus</c>，本机实测：
+        /// 标准/图层=0 顶部、绘图=2 左侧、修改=3 右侧，X-批注原先是 1 底部）。</summary>
+        private const int DockTop = 0;
+        private const int DockBottom = 1;
+        private const int DockLeft = 2;
+        private const int DockRight = 3;
+        private const int DockFloating = 4;
+
+        /// <summary>首次安装时的默认摆放：<b>停在底部横排一排</b>（就是用户现在看到的样子）。
+        /// 之后一律按用户自己拖出来的摆放走，见 <see cref="ApplySavedPlacement"/>。</summary>
+        private const int DefaultDock = DockBottom;
+
+        /// <summary>当前工具栏 COM 对象（摆放轮询用；GSCAD 上不存在，恒为 null）。</summary>
+        private static object _toolbar;
+
+        /// <summary>上次已知的摆放：没变就不重写文件（轮询每 1.2 秒最多读一次属性）。</summary>
+        private static ToolbarPlacement _knownPlacement;
+
+        /// <summary>本轮会话里是否已经摆好过位置：摆成功就不再碰它，用户怎么拖都随他。
+        /// <para>初建时 Dock 可能失败（宿主界面还没就绪），Idle 重试会再调 <c>Ensure</c>，
+        /// 只要没摆成功就继续试。</para></summary>
+        private static bool _placementApplied;
+
+        /// <summary>等落盘的候选摆放 + 已经连续读到的次数（见 <see cref="CapturePlacement"/> 的稳定判定）。</summary>
+        private static ToolbarPlacement _pendingPlacement;
+        private static int _pendingStableCount;
+
+        private static bool _placementWatchAttached;
+        private static DateTime _lastPlacementWatchUtc = DateTime.MinValue;
+        private static int _placementWatchFailures;
+
+        /// <summary>摆放轮询间隔（毫秒）。工具栏是 COM 对象、没有"被拖动"事件，只能轻量轮询。
+        /// 1.2 秒：用户拖完到关 CAD 之间基本都能抓到；又比 3 秒短得多，不至于"刚拖完就重启"丢位置。</summary>
+        private const int PlacementWatchIntervalMs = 1200;
+
+        /// <summary>连续读不到 <c>DockStatus</c> 这么多次就停掉轮询（个别宿主 / 版本不公开该属性）。</summary>
+        private const int PlacementWatchMaxFailures = 10;
+
         /// <summary>两次重试之间的最小间隔（毫秒）：Idle 在 CAD 空闲时触发极其频繁，必须节流。</summary>
         private const int RetryIntervalMs = 1000;
 
@@ -99,6 +139,10 @@ namespace XAnnotation
         /// <summary>卸载插件时摘掉 Idle 重试回调（工具栏本身保留在 CAD 界面，不随卸载消失）。</summary>
         public static void Detach()
         {
+            // 卸载前最后记一次摆放：用户拖完工具栏没过多久就卸载插件时，轮询可能还没轮到。
+            CapturePlacement(true);
+            DetachPlacementWatch();
+            _toolbar = null;
             DetachRetry();
         }
 
@@ -195,7 +239,13 @@ namespace XAnnotation
                 for (var i = 0; i < Buttons.Length; i++) AddButton(toolbar, i, Buttons[i]);
 
                 SetProperty(toolbar, "Visible", true);
-                TryDockToTop(toolbar);
+                // 摆放：每个会话只在"工具栏刚建出来"时摆一次，摆成功就不再碰它；
+                // 刷新（同一会话里重复加载 / 手动 X_PZ_TOOLBAR）时保持用户当前摆放不动 ——
+                // 一刷新就 Dock 一次，等于每次加载都把用户拖到侧边的竖排拽回下边。
+                _toolbar = toolbar;
+                if (created) _placementApplied = false;
+                if (!_placementApplied) _placementApplied = ApplySavedPlacement(toolbar);
+                AttachPlacementWatch();
 
                 message = "X-批注工具栏已" + (created ? "创建" : "刷新") + "（" + Buttons.Length + " 个按钮）。";
                 return true;
@@ -366,11 +416,183 @@ namespace XAnnotation
             catch (Exception ex) { PluginLog.Warning("Toolbar.SupportPath", Describe(ex)); return false; }
         }
 
-        /// <summary>尽量把工具栏停靠到顶部工具栏区（失败保持浮动，用户可自己拖）。</summary>
-        private static void TryDockToTop(object toolbar)
+        // ============ 摆放：默认底部横排，之后跟着用户走 ============
+
+        /// <summary>新建工具栏时摆一次位置：<b>有记录就按记录还原，没记录就用默认（底部横排一排）</b>。
+        /// <para>用户的分工很清楚：有人喜欢下边横排、有人喜欢侧边竖排（拖到左右两侧会自动变竖排）。
+        /// 工具栏是每个 CAD 会话现场重建的，宿主自己不记位置，所以位置必须由插件记、插件摆
+        /// （见 <see cref="ToolbarPlacement"/>）。这里只"还原"，用户随便拖 —— 拖动结果由
+        /// <see cref="CapturePlacement"/> 轮询记住，重启后照原样摆回。</para>
+        /// <para><b>浮动状态还原不了</b>（实测 AutoCAD 2014）：COM 新建出来的工具栏本身就是浮动的，
+        /// 但<b>不可见</b>，<c>Visible=true</c> 设不上去（读回来还是 False）、设 <c>Left/Top</c> 直接抛
+        /// "工具栏不可见"；只有 <c>Dock(0..3)</c> 之后它才会真的显示出来。
+        /// <c>Dock(4)</c> 更不行 —— 会报"参数 Side 无效"。所以记录是浮动时退回默认（底部横排），
+        /// 形状仍是横排一排，不会莫名其妙变成侧边竖排。</para>
+        /// <returns>摆成功返回 <c>true</c>；失败时下次 <c>Ensure</c>（Idle 重试）还会再试一次。</returns></summary>
+        private static bool ApplySavedPlacement(object toolbar)
         {
-            try { toolbar.InvokeMethod("Dock", 1); }
-            catch (Exception ex) { PluginLog.Warning("Toolbar.Dock", ex.Message); }
+            if (toolbar == null) return false;
+            var saved = ToolbarPlacement.Load();
+            _knownPlacement = saved;
+
+            if (saved == null || !saved.HasDock)
+            {
+                // 第一次装（或记录文件被删）：维持老样子 —— 停在底部、横排一排。
+                return TryDock(toolbar, DefaultDock);
+            }
+
+            if (saved.Dock == DockFloating)
+            {
+                PluginLog.Info("Toolbar.Placement",
+                    "上次是浮动摆放（" + saved.Describe() + "），该状态无法还原，按默认底部横排显示。");
+                return TryDock(toolbar, DefaultDock);
+            }
+
+            if (TryDock(toolbar, saved.Dock))
+            {
+                PluginLog.Info("Toolbar.Placement", "按上次摆放恢复：" + saved.Describe() + "。");
+                return true;
+            }
+
+            // 记录里的方向在这个宿主上摆不动：退回默认，别留在半空。
+            PluginLog.Warning("Toolbar.Placement", "按记录摆放失败，回到默认底部横排。");
+            return TryDock(toolbar, DefaultDock);
+        }
+
+        /// <summary>把工具栏停靠到指定方向；失败返回 <c>false</c>（不冒泡）。
+        /// <para>用直接反射而不是 <c>InvokeMethod</c> 扩展：那个扩展会把异常吞成 <c>null</c>，
+        /// 这里需要知道"到底摆成功了没有"。</para></summary>
+        private static bool TryDock(object toolbar, int dock)
+        {
+            if (toolbar == null) return false;
+            try
+            {
+                toolbar.GetType().InvokeMember("Dock", BindingFlags.InvokeMethod, null, toolbar, new object[] { dock });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("Toolbar.Dock", "Dock(" + dock + ") 失败：" + Describe(ex));
+                return false;
+            }
+        }
+
+        private static void AttachPlacementWatch()
+        {
+            if (_placementWatchAttached) return;
+            try
+            {
+                _lastPlacementWatchUtc = DateTime.MinValue;
+                _placementWatchFailures = 0;
+                CadApplication.Idle += OnPlacementWatchIdle;
+                _placementWatchAttached = true;
+            }
+            catch (Exception ex)
+            {
+                _placementWatchAttached = false;
+                PluginLog.Warning("Toolbar.Placement.Watch", Describe(ex));
+            }
+        }
+
+        private static void DetachPlacementWatch()
+        {
+            if (!_placementWatchAttached) return;
+            _placementWatchAttached = false;
+            try { CadApplication.Idle -= OnPlacementWatchIdle; }
+            catch (Exception ex) { PluginLog.Warning("Toolbar.Placement.Watch", Describe(ex)); }
+        }
+
+        /// <summary>轮询工具栏摆放：用户把它拖到侧边（竖排）或拖成浮动时，记下来，下次启动照原样摆回。
+        /// <para>Idle 在 CAD 空闲时触发极频繁，必须节流；读 2～4 个 COM 属性本身很轻，
+        /// 但连续失败（宿主没公开 <c>DockStatus</c>）就停掉，免得每次空闲都去踩一遍异常。</para></summary>
+        private static void OnPlacementWatchIdle(object sender, EventArgs e)
+        {
+            var now = DateTime.UtcNow;
+            if ((now - _lastPlacementWatchUtc).TotalMilliseconds < PlacementWatchIntervalMs) return;
+            _lastPlacementWatchUtc = now;
+            CapturePlacement(false);
+        }
+
+        /// <summary>读一次当前摆放并落盘（没变化就不写）。<paramref name="force"/> = 忽略"没变化"判定。
+        /// <para>整个方法包一层 try/catch：它跑在 CAD 的 Idle 回调里，任何冒出去的异常都会变成
+        /// "致命错误"（AutoCAD 进程内没有 WPF 兜底），而记住摆放只是增强项 —— 失败顶多位置记不住。</para></summary>
+        private static void CapturePlacement(bool force)
+        {
+            try
+            {
+                var toolbar = _toolbar;
+                if (toolbar == null || !_placementWatchAttached) return;
+
+                if (!TryReadInt(toolbar, "DockStatus", out var dock) || dock < 0)
+                {
+                    _placementWatchFailures++;
+                    if (_placementWatchFailures >= PlacementWatchMaxFailures)
+                    {
+                        DetachPlacementWatch();
+                        PluginLog.Warning("Toolbar.Placement.Watch",
+                            "当前宿主读不到工具栏停靠状态，已停止记住摆放（不影响工具栏本身）。");
+                    }
+                    return;
+                }
+                _placementWatchFailures = 0;
+
+                var placement = new ToolbarPlacement { Dock = dock, Rows = 1 };
+                if (dock == DockFloating)
+                {
+                    // 浮动坐标只用于记录/日志：浮动状态还原不了（见 ApplySavedPlacement 的说明）。
+                    if (TryReadInt(toolbar, "Left", out var left)) placement.Left = left;
+                    if (TryReadInt(toolbar, "Top", out var top)) placement.Top = top;
+                    if (TryReadInt(toolbar, "FloatingRows", out var rows) && rows > 0) placement.Rows = rows;
+                }
+
+                if (!force && _knownPlacement != null && _knownPlacement.SameAs(placement))
+                {
+                    _pendingPlacement = null;
+                    _pendingStableCount = 0;
+                    return;
+                }
+
+                // 稳定判定：刚 Dock 完、或用户还在拖的时候读到的都是中间态，**连续两次读到同样的值**才落盘，
+                // 否则会把"刚创建还没摆好"的位置记下来，下次启动就摆到那个错误的地方。
+                if (!force)
+                {
+                    if (_pendingPlacement != null && _pendingPlacement.SameAs(placement))
+                    {
+                        _pendingStableCount++;
+                    }
+                    else
+                    {
+                        _pendingPlacement = placement;
+                        _pendingStableCount = 0;
+                    }
+                    if (_pendingStableCount < 1) return;
+                }
+
+                _pendingPlacement = null;
+                _pendingStableCount = 0;
+                _knownPlacement = placement;
+                ToolbarPlacement.Save(placement);
+                PluginLog.Info("Toolbar.Placement", "已记住工具栏摆放：" + placement.Describe() + "。");
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("Toolbar.Placement.Capture", Describe(ex));
+            }
+        }
+
+        /// <summary>安静地读一个整型属性：失败返回 <c>false</c> 且不记日志（轮询路径不能刷日志）。</summary>
+        private static bool TryReadInt(object target, string name, out int value)
+        {
+            value = 0;
+            if (target == null) return false;
+            try
+            {
+                var raw = target.GetType().InvokeMember(name, BindingFlags.GetProperty, null, target, null);
+                if (raw == null) return false;
+                value = Convert.ToInt32(raw, CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch { return false; }
         }
 
         private static void SetProperty(object target, string name, object value)
