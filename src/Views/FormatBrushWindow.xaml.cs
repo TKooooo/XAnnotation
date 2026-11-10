@@ -39,6 +39,7 @@ namespace XAnnotation.Views
 
         public FormatBrushWindow(AnnotationService.FormatBrushSpec spec)
         {
+            WpfHost.Ensure();
             InitializeComponent();
             CadDialog.RegisterFloating(this);
             _spec = spec ?? new AnnotationService.FormatBrushSpec();

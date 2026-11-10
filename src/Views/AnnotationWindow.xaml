@@ -4,6 +4,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="X-批注" Width="500" Height="520"
         MinWidth="420" MinHeight="460"
+        WindowStartupLocation="CenterScreen"
         ResizeMode="CanResizeWithGrip">
     <Window.Resources>
         <ResourceDictionary Source="../Themes/XTheme.xaml"/>

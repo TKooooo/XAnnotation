@@ -44,16 +44,23 @@ namespace XAnnotation
                 s.DefaultRole=Get(x,"DefaultRole",s.DefaultRole);
                 s.AutoNumber = ParseBool(Get(x, "AutoNumber", "true"), true);
                 s.NextNumber = ParseInt(Get(x, "NextNumber", "1"), 1);
+                // 批注编号前缀（1.0.11 起可配）：老配置没有该节点 → 用默认 "X"，编号仍是 X-001。
+                s.NumberPrefix = AnnotationNumbering.NormalizePrefix(Get(x, "NumberPrefix", AnnotationNumbering.DefaultPrefix));
                 s.AutoCloseOrtho=ParseBool(Get(x,"AutoCloseOrtho","true"),true);s.AutoCloseSnap=ParseBool(Get(x,"AutoCloseSnap","true"),true);s.ViewTopIsNorth=ParseBool(Get(x,"ViewTopIsNorth","true"),true);s.DoubleClickEdit=ParseBool(Get(x,"DoubleClickEdit","true"),true);s.ContinuousAnnotation=ParseBool(Get(x,"ContinuousAnnotation","true"),true);s.CloudOnly=ParseBool(Get(x,"CloudOnly","false"),false);s.SameColors=ParseBool(Get(x,"SameColors","true"),true);s.LayerAppendDate=ParseBool(Get(x,"LayerAppendDate","true"),true);s.LayerAppendName=ParseBool(Get(x,"LayerAppendName","false"),false);s.DateBeforeName=ParseBool(Get(x,"DateBeforeName","true"),true);s.Connector=Get(x,"Connector","-");s.Plottable=ParseBool(Get(x,"Plottable","false"),false);s.CheckHeight=ParseDouble(Get(x,"CheckHeight","8"),8);
                 s.AutoTextViewPercent=ParseDouble(Get(x,"AutoTextViewPercent","5"),5);
                 s.ShowDiscipline=ParseBool(Get(x,"ShowDiscipline","true"),true);s.ShowAuthor=ParseBool(Get(x,"ShowAuthor","true"),true);s.ShowRole=ParseBool(Get(x,"ShowRole","true"),true);s.ShowDate=ParseBool(Get(x,"ShowDate","true"),true);s.ShowStatus=ParseBool(Get(x,"ShowStatus","true"),true);s.ShowDrawingNo=ParseBool(Get(x,"ShowDrawingNo","true"),true);
                 s.ArchiveOnCreate=ParseBool(Get(x,"ArchiveOnCreate","true"),true);
+                // 导出 Word 截图底色：0=白底黑字（老配置没有该节点时的默认值）、1=白底彩色、2=保持原样。
+                s.ExportShotStyle=ParseInt(Get(x,"ExportShotStyle","0"),0);
                 s.ContentSuggest=ParseBool(Get(x,"ContentSuggest","true"),true);
                 // 功能选择框"上次的选择"（外形 + 三个绘制方式勾选项）：下次打开面板时恢复。
                 s.PanelShape=Get(x,"PanelShape","矩形");
                 s.PanelContinuous=ParseBool(Get(x,"PanelContinuous","false"),false);
                 s.PanelMultiMode=ParseBool(Get(x,"PanelMultiMode","false"),false);
                 s.PanelCloudOnly=ParseBool(Get(x,"PanelCloudOnly","false"),false);
+                // 功能选择框（快捷菜单）上次的位置：没记录就是 NaN，面板按默认位置摆。
+                s.PanelLeft=ParseDouble(Get(x,"PanelLeft","NaN"),double.NaN);
+                s.PanelTop=ParseDouble(Get(x,"PanelTop","NaN"),double.NaN);
                 // 按状态给整条批注着色（已回复 / 已完成）。老配置没有这个节点 → 默认开启，
                 // 因为这两个状态色的语义就是"整条批注换个颜色"，默认关掉等于功能不可见。
                 s.StatusColorize=ParseBool(Get(x,"StatusColorize","true"),true);
@@ -86,12 +93,18 @@ namespace XAnnotation
                 new XElement("LineWidth",s.LineWidth.ToString(CultureInfo.InvariantCulture)),new XElement("ScaleRatio",s.ScaleRatio.ToString(CultureInfo.InvariantCulture)),new XElement("CloudAutoFit",s.CloudAutoFit),new XElement("FontAutoFit",s.FontAutoFit),new XElement("FixedWidth",s.FixedWidth),new XElement("FixedWidthValue",s.FixedWidthValue.ToString(CultureInfo.InvariantCulture)),
                 new XElement("DefaultAuthor", s.DefaultAuthor), new XElement("DefaultDiscipline", s.DefaultDiscipline),
                 new XElement("DefaultRole",s.DefaultRole),new XElement("AutoNumber", s.AutoNumber), new XElement("NextNumber", s.NextNumber),
+                // 编号前缀：空值会被规范成默认 "X"，所以这里直接写规范化后的值。
+                new XElement("NumberPrefix", AnnotationNumbering.NormalizePrefix(s.NumberPrefix)),
                 new XElement("AutoCloseOrtho",s.AutoCloseOrtho),new XElement("AutoCloseSnap",s.AutoCloseSnap),new XElement("ViewTopIsNorth",s.ViewTopIsNorth),new XElement("DoubleClickEdit",s.DoubleClickEdit),new XElement("ContinuousAnnotation",s.ContinuousAnnotation),new XElement("CloudOnly",s.CloudOnly),new XElement("SameColors",s.SameColors),new XElement("LayerAppendDate",s.LayerAppendDate),new XElement("LayerAppendName",s.LayerAppendName),new XElement("DateBeforeName",s.DateBeforeName),new XElement("Connector",s.Connector),new XElement("Plottable",s.Plottable),new XElement("CheckHeight",s.CheckHeight.ToString(CultureInfo.InvariantCulture)),new XElement("AutoTextViewPercent",s.AutoTextViewPercent.ToString(CultureInfo.InvariantCulture)),
                 new XElement("ShowDiscipline",s.ShowDiscipline),new XElement("ShowAuthor",s.ShowAuthor),new XElement("ShowRole",s.ShowRole),new XElement("ShowDate",s.ShowDate),new XElement("ShowStatus",s.ShowStatus),new XElement("ShowDrawingNo",s.ShowDrawingNo),
                 new XElement("ArchiveOnCreate",s.ArchiveOnCreate),new XElement("ContentSuggest",s.ContentSuggest),
+                new XElement("ExportShotStyle",s.ExportShotStyle),
                 // 功能选择框的"上次选择"：Panel* 只被功能选择框读写，快速直绘不受影响。
                 new XElement("PanelShape",string.IsNullOrWhiteSpace(s.PanelShape)?"矩形":s.PanelShape),
                 new XElement("PanelContinuous",s.PanelContinuous),new XElement("PanelMultiMode",s.PanelMultiMode),new XElement("PanelCloudOnly",s.PanelCloudOnly),
+                // 功能选择框上次的位置（屏幕 DIP）。无记录时写 NaN，读回来仍是"没记录"。
+                new XElement("PanelLeft",s.PanelLeft.ToString("R",CultureInfo.InvariantCulture)),
+                new XElement("PanelTop",s.PanelTop.ToString("R",CultureInfo.InvariantCulture)),
                 new XElement("StatusColorize",s.StatusColorize)).Save(PathName);
         }
 

@@ -152,8 +152,10 @@ namespace XAnnotation
                 ApplyRow(data, row);
                 if (string.IsNullOrWhiteSpace(data.Number))
                 {
+                    // 补号同样按「设置 → 编号前缀」来，前缀与图内已有编号保持一致（见 AnnotationNumbering）。
+                    var prefix = AnnotationNumbering.ResolvePrefix(settings);
                     string candidate;
-                    do { candidate = "X-" + (++autoSeq).ToString("000"); } while (!usedNumbers.Add(candidate));
+                    do { candidate = AnnotationNumbering.Format(prefix, ++autoSeq); } while (!usedNumbers.Add(candidate));
                     data.Number = candidate;
                 }
                 else usedNumbers.Add(data.Number);

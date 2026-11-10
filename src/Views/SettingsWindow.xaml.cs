@@ -36,8 +36,10 @@ namespace XAnnotation.Views
         /// <summary>显示或激活设置窗口（单例、非模态）。
         /// <para><b>非模态</b>是刻意的：模态（原先走的 <c>ShowModalWindow</c>）会禁用其它顶层窗口，
         /// 于是"设置窗口一开，批注面板既点不动、也不能单独关、必须先退出设置窗口"。</para>
-        /// <para>anchor 给出时，新窗口会摆在它的右侧（面板固定在屏幕左上角，这样两个窗口同时可见）。</para></summary>
-        internal static SettingsWindow ShowOrActivate(AnnotationSettings settings, IEnumerable<string> textStyles = null, Window anchor = null)
+        /// <para>位置：默认<b>居中于显示器</b>（XAML 里声明 <c>CenterScreen</c>，再由
+        /// <see cref="CadDialog.CenterOnMonitor"/> 按物理像素摆正）。不再贴着批注面板摆，
+        /// 因为面板固定左上角、设置窗跟在右侧时常常半个身子在屏幕外。</para></summary>
+        internal static SettingsWindow ShowOrActivate(AnnotationSettings settings, IEnumerable<string> textStyles = null)
         {
             var existing = _instance;
             if (existing != null && existing.IsLoaded)
@@ -57,35 +59,16 @@ namespace XAnnotation.Views
             }
 
             var window = new SettingsWindow(settings, textStyles);
-            if (anchor != null) PlaceBeside(window, anchor);
             window.Closed += (_, __) => { if (ReferenceEquals(_instance, window)) _instance = null; };
             _instance = window;
             CadDialog.ShowModeless(window);
             return window;
         }
 
-        /// <summary>把窗口摆到参照窗口右侧（越界时贴到可用区域右边缘）。</summary>
-        private static void PlaceBeside(Window window, Window anchor)
-        {
-            try
-            {
-                var area = SystemParameters.WorkArea;
-                var width = window.Width > 0 ? window.Width : 640;
-                var height = window.Height > 0 ? window.Height : 540;
-                var left = anchor.Left + anchor.ActualWidth + 12;
-                if (left + width > area.Right - 8) left = Math.Max(area.Left + 8, area.Right - 8 - width);
-                var top = Math.Min(Math.Max(area.Top + 8, anchor.Top), Math.Max(area.Top + 8, area.Bottom - 8 - height));
-                // Manual 必须在 Show 之前设：窗口默认会被挂到 CAD 主窗口后"居中于主窗口"。
-                window.WindowStartupLocation = WindowStartupLocation.Manual;
-                window.Left = left;
-                window.Top = top;
-            }
-            catch (Exception ex) { PluginLog.Warning("SettingsWindow.PlaceBeside", ex.Message); }
-        }
-
         /// <summary>构造设置窗口。textStyles 为当前 DWG 中可用的文字样式名列表。</summary>
         public SettingsWindow(AnnotationSettings value, IEnumerable<string> textStyles = null)
         {
+            WpfHost.Ensure();
             InitializeComponent();
             // 登记为"置顶漂浮窗口"：弹模态窗口（批注内容窗等）时会被临时降为普通窗口，否则会把它盖住。
             CadDialog.RegisterFloating(this);
@@ -95,6 +78,7 @@ namespace XAnnotation.Views
             DefaultRoleCombo.ItemsSource = AnnotationOptions.Roles;
             ConnectorCombo.ItemsSource = new[] { "-", "_", "·", "无" };
             ScaleRatioCombo.ItemsSource = AnnotationOptions.PlotScales;
+            ExportShotStyleCombo.ItemsSource = AnnotationOptions.ExportShotStyles;
             // 所有颜色下拉菜单共享 ACI 255 色列表
             foreach (var combo in new[] { ColorIndexCombo, CloudColorCombo, LeaderColorCombo, TextColorCombo, BoxColorCombo, ReplyColorCombo, ScreenshotBackgroundColorCombo, PassColorCombo, CheckColorCombo })
                 combo.ItemsSource = AciColors.All;
@@ -125,6 +109,8 @@ namespace XAnnotation.Views
             DefaultAuthorText.Text = _s.DefaultAuthor; DefaultRoleCombo.Text = _s.DefaultRole; DefaultDisciplineText.Text = _s.DefaultDiscipline;
             FixedWidthCheck.IsChecked = _s.FixedWidth; Set(FixedWidthValueText, _s.FixedWidthValue);
             AutoNumberCheck.IsChecked = _s.AutoNumber;
+            NumberPrefixText.Text = AnnotationNumbering.NormalizePrefix(_s.NumberPrefix);
+            RefreshNumberPrefixHint();
             LayerNameText.Text = _s.LayerName; TextStyleCombo.Text = _s.TextStyleName;
             SameColorsCheck.IsChecked = _s.SameColors;
             SelectColor(ColorIndexCombo, _s.ColorIndex); SelectColor(CloudColorCombo, _s.CloudColor);
@@ -142,6 +128,7 @@ namespace XAnnotation.Views
             ShowAuthorCheck.IsChecked = _s.ShowAuthor; ShowRoleCheck.IsChecked = _s.ShowRole;
             ShowDateCheck.IsChecked = _s.ShowDate; ShowStatusCheck.IsChecked = _s.ShowStatus;
             ShowDrawingNoCheck.IsChecked = _s.ShowDrawingNo;
+            ExportShotStyleCombo.SelectedIndex = ExportShotToIndex(_s.ExportShotStyle);
         }
 
         private void Save_Click(object sender, RoutedEventArgs e)
@@ -173,6 +160,9 @@ namespace XAnnotation.Views
                 _s.DefaultDiscipline = DefaultDisciplineText.Text.Trim();
                 _s.FixedWidth = On(FixedWidthCheck); _s.FixedWidthValue = N(FixedWidthValueText, "固定宽度", 1);
                 _s.AutoNumber = On(AutoNumberCheck);
+                // 编号前缀：空值/全是非法字符时 normalize 会回落到 "X"，所以这里不必再报错；
+                // 回写的是规范化后的值，用户在设置里看到的就是实际会用的前缀。
+                _s.NumberPrefix = AnnotationNumbering.NormalizePrefix(NumberPrefixText.Text);
                 _s.LayerName = LayerNameText.Text.Trim();
                 if (_s.LayerName.Length == 0) throw new InvalidOperationException("图层名称不能为空。");
                 _s.TextStyleName = TextStyleCombo.Text.Trim();
@@ -193,6 +183,7 @@ namespace XAnnotation.Views
                 _s.ShowAuthor = On(ShowAuthorCheck); _s.ShowRole = On(ShowRoleCheck);
                 _s.ShowDate = On(ShowDateCheck); _s.ShowStatus = On(ShowStatusCheck);
                 _s.ShowDrawingNo = On(ShowDrawingNoCheck);
+                _s.ExportShotStyle = ExportShotFromIndex(ExportShotStyleCombo.SelectedIndex);
                 // 统一颜色模式：所有"分项颜色"同步为统一颜色。
                 // 注意**不要把 ReplyColor / PassColor 卷进来**：它们是"整条批注的状态色"，
                 // 不属于分项着色，被覆盖的话用户在「状态颜色」里挑的已回复/已完成颜色保存后就被冲成统一色了。
@@ -248,6 +239,23 @@ namespace XAnnotation.Views
             RefreshDependencies();
         }
 
+        /// <summary>「编号前缀」输入时实时更新预览（用户能当场看到新编号长什么样）。</summary>
+        private void NumberPrefix_Changed(object sender, TextChangedEventArgs e)
+        {
+            try { RefreshNumberPrefixHint(); }
+            catch (Exception ex) { PluginLog.Warning("Settings.NumberPrefix", ex.Message); }
+        }
+
+        /// <summary>编号前缀预览：默认 X → <c>X-001</c>、<c>X-002</c>。
+        /// 填 "X-" 与填 "X" 等效（分隔符会自动补/不重复补），所以预览里两句都用 normalize 后的前缀算。</summary>
+        private void RefreshNumberPrefixHint()
+        {
+            if (NumberPrefixHint == null) return;
+            var prefix = AnnotationNumbering.NormalizePrefix(NumberPrefixText == null ? null : NumberPrefixText.Text);
+            NumberPrefixHint.Text = "编号格式：" + AnnotationNumbering.Format(prefix, 1) + "、" +
+                                    AnnotationNumbering.Format(prefix, 2) + "…（只影响之后新建的批注，已有编号不变）";
+        }
+
         /// <summary>把当前比例与打印尺寸当场换算成图面尺寸显示，避免"选了比例不知道算成多大"。</summary>
         private void RefreshScaleHint()
         {
@@ -262,11 +270,11 @@ namespace XAnnotation.Views
                            " → 图面字高 = " + Num(textMm) + "mm × " + denominator + " = " + Num(textMm * n) +
                            "；图面云线半径 = " + Num(radiusMm) + "mm × " + denominator + " = " + Num(radiusMm * n) + "。";
                 if (On(FontAutoFitCheck) && On(CloudAutoFitCheck))
-                    hint += " 当前勾选了字体/云线自适应：字高与云线半径都按云线尺寸计算，上面的比例不参与。";
+                    hint += " 当前勾选了字体/云线自适应：字高按云线尺寸计算；云线弧瓣仍按上面的比例换算，框选范围只决定瓣数。";
                 else if (On(FontAutoFitCheck))
                     hint += " 当前勾选了字体自适应：字高按云线尺寸计算、比例不参与字高换算。";
                 else if (On(CloudAutoFitCheck))
-                    hint += " 当前勾选了云线自适应：云线半径与线宽按云线尺寸计算、比例不参与。";
+                    hint += " 当前勾选了云线自适应：弧瓣按上面的比例换算，框选范围只决定瓣数。";
                 ScaleHintText.Text = hint;
             }
             catch (Exception ex)
@@ -280,9 +288,10 @@ namespace XAnnotation.Views
         {
             if (!IsInitialized) return;
             FixedWidthValueText.IsEnabled = On(FixedWidthCheck);
-            var cloudAuto = On(CloudAutoFitCheck);
-            CloudRadiusText.IsEnabled = !cloudAuto;
-            LineWidthText.IsEnabled = !cloudAuto;
+            // 云线自适应现在只让"瓣数"随框大小变，弧瓣半径/线宽仍按这里的打印尺寸 × 图面比例换算，
+            // 所以这两个输入框始终保持可用。
+            CloudRadiusText.IsEnabled = true;
+            LineWidthText.IsEnabled = true;
             var fontAuto = On(FontAutoFitCheck);
             AutoTextViewPercentText.IsEnabled = fontAuto;
             HeaderHeightText.IsEnabled = !fontAuto;
@@ -336,6 +345,10 @@ namespace XAnnotation.Views
         private static string Num(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
 
         // ---- 辅助方法 ----
+        /// <summary>截图底色：设置值(0/1/2) ↔ 下拉索引（两者同序，越界一律回落默认「白底黑字」）。</summary>
+        private static int ExportShotToIndex(int style) => style >= 0 && style < AnnotationOptions.ExportShotStyles.Length ? style : 0;
+        private static int ExportShotFromIndex(int index) => index >= 0 && index < AnnotationOptions.ExportShotStyles.Length ? index : 0;
+
         private static bool On(CheckBox x) => x.IsChecked == true;
         private static void Set(TextBox x, double v) => x.Text = v.ToString("0.###", CultureInfo.InvariantCulture);
         private static double N(TextBox x, string name, double min, double max = double.MaxValue)

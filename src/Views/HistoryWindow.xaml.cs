@@ -55,6 +55,7 @@ namespace XAnnotation.Views
         /// <summary><paramref name="currentDrawing"/> 为当前 DWG 文件名（不含路径），由命令层传入；空则不按图名过滤。</summary>
         public HistoryWindow(string currentDrawing = null)
         {
+            WpfHost.Ensure();
             InitializeComponent();
             _currentDrawing = currentDrawing ?? "";
             // ?. 兜底：万一 XAML/BAML 与代码不匹配导致某个 x:Name 未连上，只是退化为"不按图过滤"，不抛空引用。

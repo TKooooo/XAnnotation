@@ -204,6 +204,9 @@ namespace XAnnotation.Views
         /// <summary>连勾多项时合并成一次重开的等待时间。</summary>
         private static readonly TimeSpan OptionStartDebounce = TimeSpan.FromMilliseconds(500);
 
+        /// <summary>面板位置落盘的防抖（毫秒）：拖动过程中每帧都会触发 LocationChanged。</summary>
+        private const int PositionSaveDebounceMs = 700;
+
         /// <summary>排队的 X_PZ_RUN 超过这个时间仍未被宿主消费，就判定"命令被丢了"，改走兜底入口。
         /// <para>2026-10-13 由 600 收到 400：<c>SendStringToExecute</c> 在部分宿主上被静默丢弃时，
         /// 这 400 ms 就是"面板没反应"的时长；配合 <see cref="MaxRunRetry"/> 次重试，
@@ -234,6 +237,8 @@ namespace XAnnotation.Views
 
         private AnnotationPanel()
         {
+            // 防"关掉最后一个插件窗口 → 宿主 WPF Application 被自动关闭 → 之后再也弹不出窗口"，见 WpfHost。
+            WpfHost.Ensure();
             InitializeComponent();
             // 登记为"置顶漂浮窗口"：弹模态窗口（批注内容窗等）时会被临时降为普通窗口，
             // 否则模态窗会躲在本面板后面（两个 Topmost 窗口相互不能盖住）。
@@ -247,6 +252,23 @@ namespace XAnnotation.Views
             RoleCombo.ItemsSource = AnnotationOptions.Roles;
             // 加载当前设置值
             RefreshControls();
+            // 上次停在哪就先摆到哪（在 Show 之前设 Left/Top，避免"先闪在左上角再跳到右下角"）；
+            // 真实高度要到布局之后才知道，贴边夹取放在 Loaded 里做（见 RestorePanelPosition）。
+            if (!double.IsNaN(_s.PanelLeft) && !double.IsNaN(_s.PanelTop))
+            {
+                _placingPanel = true;
+                try { Left = _s.PanelLeft; Top = _s.PanelTop; }
+                finally { _placingPanel = false; }
+            }
+            else
+            {
+                // 没有历史位置：默认落到屏幕右下角（以前是左上角 +20，窄而高的一条竖排长条）。
+                // 这里先用估算高度摆一次，真实高度在 Loaded 里按 RestorePanelPosition 再夹一次。
+                DefaultPanelPosition(0, 0, out var defaultLeft, out var defaultTop);
+                _placingPanel = true;
+                try { Left = defaultLeft; Top = defaultTop; }
+                finally { _placingPanel = false; }
+            }
             // 选项变更的防抖：只有在"这一轮已经在跑/已排队"时才需要做点什么（见 OnOptionStartTick）；
             // 面板待命期间改选项只是更新状态，启动交给 StartByTrigger。
             _optionStartTimer = new DispatcherTimer(DispatcherPriority.Normal)
@@ -305,6 +327,13 @@ namespace XAnnotation.Views
             MouseLeave += (_, __) => _panelLeaveUtc = DateTime.UtcNow;
             // 焦点离开面板：如果接住焦点的是 CAD 自己，说明用户点了图纸 → 开始画（见 OnPanelDeactivated）。
             Deactivated += OnPanelDeactivated;
+            // 位置记忆：拖到哪就记到哪（防抖落盘），下次打开原地出现。
+            _positionSaveTimer = new DispatcherTimer(DispatcherPriority.Normal)
+            {
+                Interval = TimeSpan.FromMilliseconds(PositionSaveDebounceMs)
+            };
+            _positionSaveTimer.Tick += OnPositionSaveTick;
+            LocationChanged += OnPanelLocationChanged;
             Closing += (_, __) =>
             {
                 _closing = true;
@@ -315,6 +344,9 @@ namespace XAnnotation.Views
                 _startDelayTimer.Stop();
                 _runWatchdog.Stop();
                 _idleWatch.Stop();
+                if (_positionSaveTimer != null) _positionSaveTimer.Stop();
+                // 关面板前先记下当前位置：ApplyPanelSettings 会把 _s 整份写进 settings.xml。
+                CapturePanelPosition();
                 RemoveEscapeHook();
                 UnhookPointMonitor();
                 // 退订设置窗口的"已保存"通知：面板关掉后不该再被它回调。
@@ -1121,12 +1153,7 @@ namespace XAnnotation.Views
             _idleDwellTicks = 0;
             try
             {
-                Left = SystemParameters.WorkArea.Left + 20;
-                Top = SystemParameters.WorkArea.Top + 20;
-                // 窗口高度按内容自适应（XAML 里 SizeToContent="Height"）；这里只限制不超出屏幕
-                // 可用区域，超出时内部 ScrollViewer 会自动出现滚动条。
-                var maxHeight = SystemParameters.WorkArea.Height - 48;
-                if (maxHeight > 240) MaxHeight = maxHeight;
+                RestorePanelPosition();
             }
             catch (Exception ex)
             {
@@ -1153,6 +1180,122 @@ namespace XAnnotation.Views
             // 一打开就算作"刚从面板离开"：用户若直接把光标移到图纸上就是"接着去画"，不必再点一下。
             _panelLeaveUtc = DateTime.UtcNow;
             HookPointMonitor();
+        }
+
+        /// <summary>面板是否正在由代码摆位置：此时 <c>LocationChanged</c> 不记位置
+        /// （否则记下的是"还没摆好"的层叠位置，下次打开就会跑到别处）。</summary>
+        private bool _placingPanel;
+
+        /// <summary>面板位置记忆的落盘防抖：拖动过程中每帧都会 LocationChanged，不能每次都写 XML。</summary>
+        private DispatcherTimer _positionSaveTimer;
+
+        /// <summary>已经为"高度还没量出来"重试过一次位置还原（防自己调自己）。</summary>
+        private bool _positionRetried;
+
+        /// <summary>把面板摆回"上次离开时的位置"；没有记录时沿用老行为（工作区左上角 +20）。
+        /// <para><b>为什么必须记位置</b>：面板每次打开都是新实例，<c>Left/Top</c> 从零开始 ——
+        /// 用户把快捷菜单拖到图纸右下角，下次 <c>X_PZ_NOTE</c> 又回到屏幕左上角竖排。
+        /// 这里按 <see cref="AnnotationSettings.PanelLeft"/> / <see cref="AnnotationSettings.PanelTop"/> 还原，
+        /// 并在记录值落到屏幕外（换显示器 / 改分辨率）时夹回可视区，免得面板打开后看不见。</para></summary>
+        private void RestorePanelPosition()
+        {
+            // 窗口高度按内容自适应（XAML 里 SizeToContent="Height"）；这里只限制不超出屏幕
+            // 可用区域，超出时内部 ScrollViewer 会自动出现滚动条。
+            var work = SystemParameters.WorkArea;
+            var maxHeight = work.Height - 48;
+            if (maxHeight > 240) MaxHeight = maxHeight;
+
+            var left = _s.PanelLeft;
+            var top = _s.PanelTop;
+            if (double.IsNaN(left) || double.IsNaN(top))
+            {
+                var defaultWidth = ActualWidth > 0 ? ActualWidth : Width;
+                DefaultPanelPosition(defaultWidth, ActualHeight, out left, out top);
+                ApplyPanelPosition(left, top);
+                return;
+            }
+
+            var width = ActualWidth > 0 ? ActualWidth : Width;
+            var height = ActualHeight > 0 ? ActualHeight : 420;
+            var vsLeft = SystemParameters.VirtualScreenLeft;
+            var vsTop = SystemParameters.VirtualScreenTop;
+            var vsRight = vsLeft + SystemParameters.VirtualScreenWidth;
+            var vsBottom = vsTop + SystemParameters.VirtualScreenHeight;
+
+            // 至少留 80 像素在屏幕内：面板不至于完全看不见，用户还能拖回来。
+            const double keepVisible = 80;
+            left = Math.Max(vsLeft - width + keepVisible, Math.Min(left, vsRight - keepVisible));
+            top = Math.Max(vsTop, Math.Min(top, vsBottom - keepVisible));
+            // 贴底摆放时（用户就是把它放在右下角），高度一变就可能整条压到任务栏下面：整体上移。
+            if (top + height > vsBottom) top = Math.Max(vsTop, vsBottom - height);
+
+            ApplyPanelPosition(left, top);
+
+            // SizeToContent="Height"：Loaded 时高度偶尔还是 0，等布局落定后再按真实高度夹一次
+            // （只重试一次：高度真取不到时宁可位置差几像素，也不能自己把自己循环调度下去）。
+            if (ActualHeight <= 0 && !_positionRetried)
+            {
+                _positionRetried = true;
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    try { RestorePanelPosition(); }
+                    catch (Exception ex) { PluginLog.Warning("AnnotationPanel.RestorePanelPosition", ex.Message); }
+                }), DispatcherPriority.Loaded);
+            }
+        }
+
+        /// <summary>没有历史位置时的默认落点：屏幕<b>右下角</b>。
+        /// <para>以前默认是"工作区左上角 +20"——面板窄而高，落在那儿就是左边一条竖排长条，
+        /// 用户每次都得手动拖到右下角。既然它本来就是"贴在图纸右下空当里用"的，默认值就该在那儿。</para>
+        /// <para>尺寸未知时按 XAML 的默认宽度 292、估算高度 420 摆，真实尺寸到了在
+        /// <see cref="RestorePanelPosition"/> 里再夹一次。</para></summary>
+        private static void DefaultPanelPosition(double width, double height, out double left, out double top)
+        {
+            var work = SystemParameters.WorkArea;
+            const double margin = 16;
+            if (width <= 0) width = 292;
+            if (height <= 0) height = 420;
+            left = Math.Max(work.Left + margin, work.Right - width - margin);
+            top = Math.Max(work.Top + margin, work.Bottom - height - margin);
+        }
+
+        private void ApplyPanelPosition(double left, double top)
+        {
+            _placingPanel = true;
+            try
+            {
+                Left = left;
+                Top = top;
+                PluginLog.Info("AnnotationPanel.Position",
+                    "面板摆到 (" + left.ToString("0.#") + "," + top.ToString("0.#") + ")，" +
+                    (double.IsNaN(_s.PanelLeft) ? "无记录（默认位置）" : "按上次位置还原") + "。");
+            }
+            finally { _placingPanel = false; }
+        }
+
+        /// <summary>把面板当前位置记进设置对象（不落盘，落盘由 <see cref="ApplyPanelSettings"/> 统一做）。</summary>
+        private void CapturePanelPosition()
+        {
+            if (_placingPanel || !IsLoaded || WindowState != WindowState.Normal) return;
+            _s.PanelLeft = Left;
+            _s.PanelTop = Top;
+        }
+
+        private void OnPanelLocationChanged(object sender, EventArgs e)
+        {
+            if (_placingPanel || !IsLoaded) return;
+            CapturePanelPosition();
+            if (_positionSaveTimer == null) return;
+            _positionSaveTimer.Stop();
+            _positionSaveTimer.Start();
+        }
+
+        /// <summary>拖动停下来 700ms 后再落盘：用户若拖完直接按 Esc 关面板，Closing 里的保存会补上。</summary>
+        private void OnPositionSaveTick(object sender, EventArgs e)
+        {
+            _positionSaveTimer.Stop();
+            try { SettingsStore.Save(_s); }
+            catch (Exception ex) { PluginLog.Warning("AnnotationPanel.PositionSave", ex.Message); }
         }
 
         private void RefreshControls()
@@ -1245,6 +1388,8 @@ namespace XAnnotation.Views
             _s.ContinuousAnnotation = false;
             // 记住面板这次的选择（外形 + 三个绘制方式勾选项），下次打开面板时恢复。
             CapturePanelSelectionInto(_s);
+            // 面板停在哪儿也一并记住：功能选择框（快捷菜单）下次打开原地出现。
+            CapturePanelPosition();
             SettingsStore.Save(_s);
         }
 
@@ -1289,7 +1434,7 @@ namespace XAnnotation.Views
                 _instance = null;
                 PluginLog.Error("AnnotationPanel.ShowOrActivate", ex);
                 var doc = CadApplication.DocumentManager.MdiActiveDocument;
-                doc?.Editor.WriteMessage("\n打开批注功能选择框失败: " + ex.Message);
+                doc?.Editor.WriteMessage("\n打开批注功能选择框失败: " + WpfHost.Describe(ex));
             }
         }
 
@@ -1829,14 +1974,14 @@ namespace XAnnotation.Views
         /// 点谁谁在前（<see cref="WpfWindowUtil.BringToTop"/>）。
         /// <para>原先走的是 CAD 原生模态 <c>ShowModalWindow</c>：模态会禁用其它顶层窗口，
         /// 于是设置窗口一开，面板既点不动、也不能单独关，必须先退出设置窗口 —— 正是要修掉的问题。</para>
-        /// <para>新窗口摆在面板右侧（面板固定在屏幕左上角），两个窗口同时可见。</para></summary>
+        /// <para>位置由设置窗口自己决定：默认居中于显示器（见 <see cref="CadDialog.CenterOnMonitor"/>）。</para></summary>
         private void Settings_Click(object sender, RoutedEventArgs e)
         {
             try
             {
                 var doc = CadApplication.DocumentManager.MdiActiveDocument;
                 var styles = GetTextStyles(doc);
-                var w = SettingsWindow.ShowOrActivate(_s, styles, this);
+                var w = SettingsWindow.ShowOrActivate(_s, styles);
                 if (w == null) return;
 
                 // 订阅"保存后刷新面板"，同一窗口只订一次（窗口被复用时不重复挂钩子）。
@@ -1903,7 +2048,8 @@ namespace XAnnotation.Views
             if (settings.AutoNumber)
             {
                 settings.NextNumber = AnnotationService.GetNextNumber(doc);
-                data.Number = "X-" + settings.NextNumber.ToString("D3");
+                // 编号 = 「设置 → 编号前缀」+ 三位序号（默认 X → X-001），见 AnnotationNumbering。
+                data.Number = AnnotationNumbering.Format(AnnotationNumbering.ResolvePrefix(settings), settings.NextNumber);
             }
 
             return data;

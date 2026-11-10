@@ -44,6 +44,8 @@ namespace XAnnotation.Views
 
         public AnnotationWindow(AnnotationData value,bool editing)
         {
+            // 防"关掉最后一个插件窗口 → 宿主 WPF Application 被自动关闭 → 之后再也弹不出窗口"，见 WpfHost。
+            WpfHost.Ensure();
             InitializeComponent();Value=value;Title=editing?"编辑批注 · "+value.Number:"新建 X-批注";ConfirmButton.Content=editing?"更新批注":"创建批注";
             if(editing)AppendCloudButton.Visibility=Visibility.Visible; // 新建时还没有批注对象，增补无意义
             DisciplineComboBox.ItemsSource=AnnotationOptions.Disciplines;RoleComboBox.ItemsSource=AnnotationOptions.Roles;StatusComboBox.ItemsSource=AnnotationOptions.Statuses;ContentTextBox.Text=value.Content;DisciplineComboBox.Text=value.Discipline;AuthorTextBox.Text=value.Author;RoleComboBox.Text=value.Role;AnnotationDatePicker.SelectedDate=DateTime.TryParse(value.Date,out var d)?d:DateTime.Today;StatusComboBox.Text=value.Status;NumberTextBox.Text=value.Number;

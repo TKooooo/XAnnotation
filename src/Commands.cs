@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using XAnnotation.Views;
@@ -74,7 +74,8 @@ namespace XAnnotation
                 if (settings.AutoNumber)
                 {
                     settings.NextNumber = AnnotationService.GetNextNumber(doc);
-                    data.Number = "X-" + settings.NextNumber.ToString("D3");
+                    // 编号 = 「设置 → 编号前缀」+ 三位序号（默认 X → X-001），见 AnnotationNumbering。
+                    data.Number = AnnotationNumbering.Format(AnnotationNumbering.ResolvePrefix(settings), settings.NextNumber);
                 }
 
                 if (!AnnotationService.PromptGeometry(doc, settings.Clone(), out var first, out var second))
@@ -128,7 +129,7 @@ namespace XAnnotation
             }
             catch (System.Exception ex)
             {
-                doc.Editor.WriteMessage("\n绘制批注失败: " + ex.Message);
+                doc.Editor.WriteMessage("\n绘制批注失败: " + WpfHost.Describe(ex));
                 PluginLog.Error("X_PZ_DRAW", ex);
             }
         }
@@ -336,21 +337,37 @@ namespace XAnnotation
         public void EditAnnotation()
         {
             var doc = CadApplication.DocumentManager.MdiActiveDocument;
+            // 命令真的跑起来了：告诉双击路径的看门狗"不用再发 Esc 了"。
+            PluginEntry.NotifyEditCommandStarted();
             if (doc == null) { PluginEntry.RestoreQuickPropertiesMode(); return; }
+            // 双击路径一进入命令就把 DBLCLKEDIT 还回去（不能等 finally：编辑窗一开就是几十秒，
+            // 这期间 DBLCLKEDIT=0 会让用户对别的对象双击也没反应）。
+            PluginEntry.RestoreDoubleClickEdit();
             try
             {
-                var implied = doc.Editor.SelectImplied();
-                ObjectId id;
-                if (implied.Status == PromptStatus.OK && implied.Value.Count > 0)
+                // 双击路径优先：它把"双击到的实体"直接送进待编辑通道，不依赖预选。
+                // 预选经 事件 → Idle → 排队 之后不保证还在（AutoCAD 2020 上实测会丢），
+                // 一丢就退化成"选择要编辑的 X-批注:"提示，用户以为双击没反应。
+                var id = PluginEntry.TakePendingEditId();
+                if (!id.IsNull)
                 {
-                    id = implied.Value.GetObjectIds()[0];
-                    // 双击路径会在 Idle 中重建预选；取得 ID 后立即清除，避免恢复 QPMODE 时再弹快捷特性。
+                    // 双击路径会顺带设预选；这里清掉，避免恢复 QPMODE 时再弹快捷特性。
                     doc.Editor.SetImpliedSelection(new ObjectId[0]);
                 }
                 else
                 {
-                    var options = new PromptEntityOptions("\n选择要编辑的 X-批注: ");
-                    var result = doc.Editor.GetEntity(options); if (result.Status != PromptStatus.OK) return; id = result.ObjectId;
+                    var implied = doc.Editor.SelectImplied();
+                    if (implied.Status == PromptStatus.OK && implied.Value.Count > 0)
+                    {
+                        id = implied.Value.GetObjectIds()[0];
+                        // 常规预选路径：取得 ID 后立即清除，避免恢复 QPMODE 时再弹快捷特性。
+                        doc.Editor.SetImpliedSelection(new ObjectId[0]);
+                    }
+                    else
+                    {
+                        var options = new PromptEntityOptions("\n选择要编辑的 X-批注: ");
+                        var result = doc.Editor.GetEntity(options); if (result.Status != PromptStatus.OK) return; id = result.ObjectId;
+                    }
                 }
                 EditById(doc, id);
             }
@@ -377,7 +394,10 @@ namespace XAnnotation
                     Filter = "CSV 文件 (*.csv)|*.csv",
                     FileName = "批注信息_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv"
                 };
-                if (dialog.ShowDialog() != true) return;
+                // 保存对话框期间让置顶的批注列表先让位，别把它压在下面。
+                bool picked;
+                using (CadDialog.SuspendTopmost()) picked = dialog.ShowDialog() == true;
+                if (!picked) return;
                 var report = AnnotationExchange.Export(doc, dialog.FileName, only);
                 doc.Editor.WriteMessage("\n" + report);
             }
@@ -396,7 +416,9 @@ namespace XAnnotation
                     Title = "导入批注",
                     Filter = "CSV 文件 (*.csv)|*.csv|所有文件 (*.*)|*.*"
                 };
-                if (dialog.ShowDialog() != true) return;
+                bool picked;
+                using (CadDialog.SuspendTopmost()) picked = dialog.ShowDialog() == true;
+                if (!picked) return;
                 doc.Editor.WriteMessage("\n正在导入批注...");
                 var report = AnnotationExchange.Import(doc, dialog.FileName);
                 doc.Editor.WriteMessage("\n" + report);
@@ -417,7 +439,7 @@ namespace XAnnotation
                 var window = new Views.HistoryWindow(drawing);
                 CadDialog.ShowModal(window);
             }
-            catch (System.Exception ex) { doc.Editor.WriteMessage("\n打开批注历史失败: " + ex.Message); PluginLog.Error("X_PZ_HISTORY", ex); }
+            catch (System.Exception ex) { doc.Editor.WriteMessage("\n打开批注历史失败: " + WpfHost.Describe(ex)); PluginLog.Error("X_PZ_HISTORY", ex); }
         }
 
         /// <summary>打开知识库窗口：批注条目 + 常用批注语。
@@ -431,10 +453,12 @@ namespace XAnnotation
                 var window = new Views.KnowledgeWindow();
                 CadDialog.ShowModal(window);
             }
-            catch (System.Exception ex) { doc.Editor.WriteMessage("\n打开知识库失败: " + ex.Message); PluginLog.Error("X_PZ_KB", ex); }
+            catch (System.Exception ex) { doc.Editor.WriteMessage("\n打开知识库失败: " + WpfHost.Describe(ex)); PluginLog.Error("X_PZ_KB", ex); }
         }
 
-        /// <summary>修复复制/粘贴后的批注：全图扫描脱离编组的批注实体，重建编组并恢复识别。</summary>
+        /// <summary>修复复制/粘贴后的批注：全图扫描脱离编组的批注实体，重建编组并恢复识别。
+        /// <para>同时确认本图"编组可整体点选"（PICKSTYLE 的编组位）——少了它，编组建得再对，
+        /// 点批注也只会选中单个实体，看着就是"批注炸开了"。</para></summary>
         [CommandMethod("X_PZ_REPAIR", CommandFlags.Modal)]
         public void RepairAnnotations()
         {
@@ -444,6 +468,8 @@ namespace XAnnotation
                 doc.Editor.WriteMessage("\n正在扫描并修复复制/粘贴产生的批注...");
                 var report = AnnotationService.RepairOrphans(doc);
                 doc.Editor.WriteMessage("\n" + report);
+                if (AnnotationService.EnsureGroupPickStyle(doc))
+                    doc.Editor.WriteMessage("\n已打开本图的编组整体选择（PICKSTYLE）：点批注任意一处即可整体选中。");
                 AnnotationListPanel.RefreshIfOpen();
             }
             catch (System.Exception ex) { doc.Editor.WriteMessage("\n修复失败: " + ex.Message); PluginLog.Error("X_PZ_REPAIR", ex); }
@@ -594,7 +620,7 @@ namespace XAnnotation
             SettingsWindow.ShowOrActivate(SettingsWindow.SharedSettings(), styles);
         }
 
-        /// <summary>打开批注列表面板（左侧停靠）。</summary>
+        /// <summary>打开批注列表（表格 + 筛选 + 搜索 + 详情，居中显示）。</summary>
         [CommandMethod("X_PZ_LIST", CommandFlags.Modal)]
         public void AnnotationList()
         {
@@ -755,7 +781,7 @@ namespace XAnnotation
                 AnnotationListPanel.RefreshIfOpen();
                 doc.Editor.WriteMessage("\nX-批注已更新: " + data.Number); return true;
             }
-            catch (System.Exception ex) { doc.Editor.WriteMessage("\n编辑失败: " + ex.Message); return false; }
+            catch (System.Exception ex) { doc.Editor.WriteMessage("\n编辑失败: " + WpfHost.Describe(ex)); return false; }
         }
     }
 }

@@ -30,6 +30,7 @@ namespace XAnnotation.Views
 
         public KnowledgeWindow()
         {
+            WpfHost.Ensure();
             InitializeComponent();
             Loaded += (s, e) => WindowSizing.FitToWorkArea(this);
             try { Reload(); }

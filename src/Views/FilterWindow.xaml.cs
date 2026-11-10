@@ -32,6 +32,7 @@ namespace XAnnotation.Views
 
         public FilterWindow()
         {
+            WpfHost.Ensure();
             InitializeComponent();
             CadDialog.RegisterFloating(this);
             Loaded += (s, e) => { WindowSizing.FitToWorkArea(this); LoadGroups(null); };

@@ -55,6 +55,18 @@ namespace XAnnotation
         private static Document _pendingDocument;
         /// <summary>双击编辑—待处理的实体 ID</summary>
         private static ObjectId _pendingId = ObjectId.Null;
+
+        /// <summary>双击路径已经决定要编辑的实体，交给排队的 X_PZ_EDIT 取走。
+        /// <para><b>为什么不靠预选</b>：双击路径原本用 <c>SetImpliedSelection</c> 把实体塞给命令，
+        /// 但这条预选经"事件 → Idle → SendStringToExecute → 命令"一圈之后<b>不保证还在</b>
+        /// （AutoCAD 2020 上实测会丢）。预选一丢，X_PZ_EDIT 就退化成一串"选择要编辑的 X-批注:"
+        /// 提示，命令行一闪而过，用户看到的就是"双击没进批注编辑"。</para></summary>
+        private static ObjectId _pendingEditId = ObjectId.Null;
+        private static DateTime _pendingEditUtc = DateTime.MinValue;
+        /// <summary>待编辑 ID 的有效期（秒）：只用来接住紧接着的那条命令，过后一律作废。</summary>
+        private const double PendingEditValidSeconds = 15.0;
+        /// <summary>上一次双击要编辑的实体（看门狗重发命令时用）。</summary>
+        private static ObjectId _lastEditId = ObjectId.Null;
         /// <summary>双击编辑—是否处于"已布防"：已命中批注，正等 CAD 发出原生双击命令好把它拦下来</summary>
         private static bool _doubleClickArmed;
         /// <summary>双击编辑—布防时刻（UTC），给拦截加一个时间窗</summary>
@@ -75,6 +87,54 @@ namespace XAnnotation
         /// <summary>双击编辑期间临时保存 CAD 的快捷特性模式，避免与插件编辑窗口同时弹出。</summary>
         private static object _savedQuickPropertiesMode;
         private static bool _quickPropertiesSuppressed;
+        /// <summary>双击编辑期间临时保存的 DBLCLKEDIT 原值（null = 没动过）。
+        /// <para>改它是为了让 CAD 不产生原生双击命令，从根上免掉"Veto 之后命令行挂着待取消命令"。</para></summary>
+        private static object _savedDoubleClickEdit;
+        private static bool _doubleClickEditSuppressed;
+
+        /// <summary>临时关掉 DBLCLKEDIT 之后的兜底启动延迟（秒）。
+        /// <para>关掉之后正常情况下<b>不会</b>再有原生命令，但个别宿主可能不认"在事件里改系统变量"，
+        /// 那时原生命令会在几毫秒内冒出来并被 Veto（立刻启动编辑，不用等这个时间）。这里取 0.25 秒，
+        /// 既是"双击后马上出编辑框"，又给迟到的原生命令留出被拦下的窗口。</para></summary>
+        private const double SuppressedFallbackSeconds = 0.25;
+
+        /// <summary>排队发出的 X_PZ_EDIT 迟迟不开跑时的等待上限（秒），超过就发一次 Esc 清掉挂起状态。
+        /// <para>这条兜底专治"命令排在一条已被打断的原生命令后面、必须手动按 Esc"的现场问题。</para></summary>
+        private const double EditStartWatchdogSeconds = 1.0;
+
+        /// <summary>本次双击编辑的 X_PZ_EDIT 是什么时候发出去的（<see cref="DateTime.MinValue"/> = 没在等）。</summary>
+        private static DateTime _editLaunchUtc = DateTime.MinValue;
+
+        /// <summary>看门狗是否已经发过 Esc（下一步该判断要不要重发命令）。</summary>
+        private static bool _editEscapeSent;
+        /// <summary>本次双击是否已经重发过一次命令（只重发一次，避免死循环）。</summary>
+        private static bool _editResent;
+        /// <summary>Esc 之后等多久还没开跑就重发命令（秒）。</summary>
+        private const double EditResendSeconds = 0.6;
+
+        /// <summary>那条 X_PZ_EDIT 是否已经真正跑起来（由命令入口回调置位）。</summary>
+        private static bool _editCommandStarted;
+
+        /// <summary>命令入口调用：标记"排队的 X_PZ_EDIT 已经开始执行"，看门狗不再发 Esc。</summary>
+        internal static void NotifyEditCommandStarted()
+        {
+            _editCommandStarted = true;
+            _editLaunchUtc = DateTime.MinValue;
+            _editEscapeSent = false;
+            _editResent = false;
+        }
+
+        /// <summary>命令入口调用：取走"双击时决定要编辑的实体"（取走即作废，超时也作废）。
+        /// <para>这条通道专治"预选在排队期间丢失"：AutoCAD 2020 上双击批注时，命令确实起来了，
+        /// 但 <c>SelectImplied</c> 是空的，于是弹出"选择要编辑的 X-批注:"，用户以为双击没反应。</para></summary>
+        internal static ObjectId TakePendingEditId()
+        {
+            var id = _pendingEditId; var utc = _pendingEditUtc;
+            _pendingEditId = ObjectId.Null; _pendingEditUtc = DateTime.MinValue;
+            if (id.IsNull || id.IsErased) return ObjectId.Null;
+            if ((DateTime.UtcNow - utc).TotalSeconds > PendingEditValidSeconds) return ObjectId.Null;
+            return id;
+        }
 
         /// <summary>依赖兜底解析：已在自己目录里找过的程序集名（防同名重入死循环）。</summary>
         private static readonly HashSet<string> ResolvingAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -254,10 +314,17 @@ namespace XAnnotation
                 // 启动即写日志：构建时间 + DLL 实际加载路径。排查"改了没生效"时，
                 // 看日志最新一条的构建时间就知道 CAD 里跑的是哪个版本（NETLOAD 无法替换运行中的同名程序集）。
                 var buildTime = System.IO.File.GetLastWriteTime(asm.Location);
-                PluginLog.Info("Initialize", "构建于 " + buildTime.ToString("yyyy-MM-dd HH:mm:ss") + "，加载自 " + asm.Location);
+                PluginLog.Info("Initialize",
+                    "版本 " + AppInfo.GetDisplayVersion() + "，构建于 " + buildTime.ToString("yyyy-MM-dd HH:mm:ss") +
+                    "，加载自 " + asm.Location);
 
                 // 环境快照先落地：哪怕是"加载到一半炸了"，也已经留下可判断的现场信息。
                 LogEnvironment();
+
+                // 宿主 WPF Application 的守护必须排在所有建窗动作之前：把 ShutdownMode 改成
+                // OnExplicitShutdown，否则本插件最后一个窗口关闭时 WPF 会自动关掉宿主的 Application，
+                // 之后本次 CAD 会话内所有窗口都加载不出来（"应用程序对象正在关闭"）。详见 WpfHost。
+                Step(failedSteps, "WpfHost", () => { WpfHost.Ensure(); });
 
                 Step(failedSteps, "BeginDoubleClick", () => CadApplication.BeginDoubleClick += OnBeginDoubleClick);
                 Step(failedSteps, "DocumentActivated", () => CadApplication.DocumentManager.DocumentActivated += OnDocumentActivated);
@@ -278,9 +345,23 @@ namespace XAnnotation
                 {
                     try { AnnotationService.SyncNextNumber(doc); }
                     catch (System.Exception ex) { failedSteps.Add("SyncNextNumber"); PluginLog.Error("Initialize.SyncNextNumber", ex); }
+                    try { DrawingScale.Ensure(doc); }
+                    catch (System.Exception ex) { failedSteps.Add("DrawingScale"); PluginLog.Error("Initialize.DrawingScale", ex); }
                     try { ObserveDatabase(doc.Database); }
                     catch (System.Exception ex) { failedSteps.Add("ObserveDatabase"); PluginLog.Error("Initialize.ObserveDatabase", ex); }
                 }
+
+                // 双击编辑能不能用，取决于两处"参数"，远程排障时最常被问到；这里一次写全，
+                // 用户只要把日志发过来就能判断是 CAD 的 DBLCLKEDIT 关了，还是插件自己的勾选项没开。
+                try
+                {
+                    PluginLog.Info("DoubleClick.Config",
+                        "DBLCLKEDIT=" + IntSysVar("DBLCLKEDIT", -1) +
+                        "；插件设置「双击编辑」=" + SettingsStore.Load().DoubleClickEdit +
+                        "；PICKSTYLE=" + IntSysVar("PICKSTYLE", -1) +
+                        "；PICKFIRST=" + IntSysVar("PICKFIRST", -1));
+                }
+                catch (System.Exception ex) { PluginLog.Warning("DoubleClick.Config", ex.Message); }
 
                 // "初始化完成"必须留痕：日志里只有"构建于…"而没有这一条，就说明加载真被打断了。
                 PluginLog.Info("Initialize", "初始化完成。菜单=" + menuReady + "，工具栏=" + toolbarReady
@@ -346,6 +427,10 @@ namespace XAnnotation
                 // 布防途中切了图纸：作废本次双击，并把临时改掉的 QPMODE 还回去。
                 if (_doubleClickArmed) { DisarmDoubleClick(); RestoreQuickPropertiesMode(); }
                 AnnotationService.SyncNextNumber(e.Document);
+                // 换图后必须让图面单位重新识别：缓存是按"当前图"成立的一次性结果，
+                // 不清就会把上一张图的比例套到这一张上。
+                DrawingScale.Forget();
+                DrawingScale.Ensure(e.Document);
                 ObserveDatabase(e.Document?.Database);
                 XAnnotation.Views.AnnotationPanel.HandleDocumentActivated(e.Document);
                 XAnnotation.Views.AnnotationListPanel.RefreshIfOpen();
@@ -380,7 +465,13 @@ namespace XAnnotation
             try
             {
                 DisarmDoubleClick();                                   // 上一次没走完的布防一律作废
-                if (!SettingsStore.Load().DoubleClickEdit) return;
+                var doubleClickEditOn = SettingsStore.Load().DoubleClickEdit;
+                // 每次双击都留一条：远程判断"事件到底有没有来"只靠这一行
+                // （没有这行 = 宿主没发事件；有这行但没有 Hit = 命中测试没认出批注）。
+                PluginLog.Info("DoubleClick.Event",
+                    "收到双击事件 @(" + e.Location.X.ToString("0.###") + "," + e.Location.Y.ToString("0.###") +
+                    ")，插件设置「双击编辑」=" + doubleClickEditOn);
+                if (!doubleClickEditOn) return;
                 var doc = CadApplication.DocumentManager.MdiActiveDocument; if (doc == null) return;
 
                 var id = ResolveDoubleClickedAnnotation(doc, e.Location);
@@ -396,6 +487,14 @@ namespace XAnnotation
                     LaunchPendingEdit("DBLCLKEDIT=0，无原生动作");
                     return;
                 }
+
+                // ★ 关键：自己把 DBLCLKEDIT 临时关掉，让 CAD **根本不产生**原生命令。
+                //   以前只靠 DocumentLockModeChanged 里 Veto 把原生命令拦下来，代价是那次取锁被否掉之后，
+                //   CAD 会把这条命令留在"正在执行"状态，命令行挂着"按回车取消或[重试]" ——
+                //   用户必须先按一次 Esc 或回车，插件排队的 X_PZ_EDIT 才轮得到执行（现场就是"双击要按 Esc"）。
+                //   关掉 DBLCLKEDIT 之后没有原生命令可拦，也就不存在这条挂起的提示；Veto 只留作兜底
+                //   （个别宿主在事件里改系统变量不生效时才会走到）。
+                SuppressDoubleClickEdit();
 
                 // 其余情况挂 Idle 兜底：若 CAD 没有为该对象类型配置双击动作，就不会有任何命令可拦，
                 // 到点后由 OnIdle 直接启动编辑。
@@ -737,11 +836,69 @@ namespace XAnnotation
             if (_doubleClickArmed)
             {
                 var elapsed = (DateTime.UtcNow - _doubleClickArmedUtc).TotalSeconds;
-                if (elapsed > FallbackDelaySeconds) LaunchPendingEdit("未收到原生双击命令");
+                // 已经把 DBLCLKEDIT 关掉时不可能再有原生命令：用更短的兜底，双击手感不变慢。
+                var deadline = _doubleClickEditSuppressed ? SuppressedFallbackSeconds : FallbackDelaySeconds;
+                if (elapsed > deadline) LaunchPendingEdit("未收到原生双击命令");
+                else idleStillNeeded = true;
+            }
+
+            // 已排队 X_PZ_EDIT 的看门狗（两级）：
+            //   ① 超过 1 秒还没开跑 → 多半卡在"文档正在执行命令"（被 Veto 掉的原生双击命令），替用户发一次 Esc；
+            //   ② Esc 之后再等 0.6 秒仍没开跑 → 说明那条命令被宿主直接丢了，带着待编辑 ID 重发一次（只重发一次）。
+            if (_editLaunchUtc != DateTime.MinValue && !_editCommandStarted)
+            {
+                var waited = (DateTime.UtcNow - _editLaunchUtc).TotalSeconds;
+                if (!_editEscapeSent && !_editResent && waited > EditStartWatchdogSeconds)
+                {
+                    _editEscapeSent = true;
+                    _editLaunchUtc = DateTime.UtcNow;          // 重新计时：给"重发"这一步留时间
+                    try
+                    {
+                        var doc = CadApplication.DocumentManager.MdiActiveDocument;
+                        PluginLog.Warning("DoubleClick.Watchdog",
+                            "X_PZ_EDIT 在 " + EditStartWatchdogSeconds.ToString("0.#") + " 秒内没有启动：发一次 Esc 解除 CAD 的挂起状态。");
+                        doc?.SendStringToExecute("\x1b", true, false, false);
+                    }
+                    catch (System.Exception ex) { PluginLog.Error("DoubleClick.Watchdog", ex); }
+                    idleStillNeeded = true;
+                }
+                else if (_editEscapeSent && waited > EditResendSeconds)
+                {
+                    _editEscapeSent = false; _editLaunchUtc = DateTime.MinValue;
+                    _editResent = true;
+                    RelaunchPendingEdit();
+                    if (_editLaunchUtc != DateTime.MinValue) idleStillNeeded = true;
+                }
+                else if (_editResent && waited > EditStartWatchdogSeconds)
+                {
+                    // 重发也没起来：不再死磕。把临时改过的系统变量还原，别让用户的 CAD 留在 DBLCLKEDIT=0。
+                    _editLaunchUtc = DateTime.MinValue; _editResent = false;
+                    RestoreDoubleClickEdit(); RestoreQuickPropertiesMode();
+                    PluginLog.Warning("DoubleClick.Watchdog", "两次都没能启动 X_PZ_EDIT，已放弃，并还原 DBLCLKEDIT/QPMODE。");
+                }
                 else idleStillNeeded = true;
             }
 
             if (!idleStillNeeded) DetachIdle();
+        }
+
+        /// <summary>看门狗重发：Esc 之后队列已干净，带"待编辑 ID"再排一次 X_PZ_EDIT。</summary>
+        private static void RelaunchPendingEdit()
+        {
+            try
+            {
+                var doc = CadApplication.DocumentManager.MdiActiveDocument;
+                var id = _lastEditId;
+                if (doc == null || id.IsNull || id.IsErased) return;
+                PluginLog.Warning("DoubleClick.Relaunch", "X_PZ_EDIT 被宿主丢弃，重发一次（实体 " + id + "）。");
+                _pendingEditId = id; _pendingEditUtc = DateTime.UtcNow;
+                doc.Editor.SetImpliedSelection(new[] { id });
+                doc.SendStringToExecute("X_PZ_EDIT ", true, false, false);
+                _editCommandStarted = false;
+                _editLaunchUtc = DateTime.UtcNow;
+                AttachIdle();
+            }
+            catch (System.Exception ex) { PluginLog.Error("DoubleClick.Relaunch", ex); }
         }
 
         /// <summary>启动编辑：先解除布防，再重建预选并排入 X_PZ_EDIT。
@@ -760,8 +917,17 @@ namespace XAnnotation
             try
             {
                 PluginLog.Info("DoubleClick.Launch", "启动 X_PZ_EDIT（" + reason + "）。");
+                _lastEditId = id;
+                // 两条通道都给：预选（常规路径）+ 待编辑 ID（预选丢了也能接上，见 _pendingEditId）。
+                _pendingEditId = id; _pendingEditUtc = DateTime.UtcNow;
                 doc.Editor.SetImpliedSelection(new[] { id });
                 doc.SendStringToExecute("X_PZ_EDIT ", true, false, false);
+                // 看门狗：个别宿主会把排队命令压在"文档正在执行命令"的状态后面（现场表现就是
+                // "双击要按一下 Esc 才弹出编辑框"）。1 秒内没见到命令真正开跑，就替用户按一次 Esc
+                // 把挂起状态清掉 —— 已经排队的那条 X_PZ_EDIT 随后就会执行，不需要重发。
+                _editCommandStarted = false;
+                _editLaunchUtc = DateTime.UtcNow;
+                AttachIdle();
             }
             catch (System.Exception ex)
             {
@@ -796,6 +962,42 @@ namespace XAnnotation
             catch (System.Exception ex) { PluginLog.Error("SysVar." + name, ex); return fallback; }
         }
 
+        /// <summary>双击期间把 DBLCLKEDIT 临时改成 0：CAD 判定"双击不做任何原生动作"，
+        /// 于是不会产生 MTEDIT / QUICKPROPERTIES 这类原生命令。
+        /// <para><b>为什么这能治"双击要按 Esc"</b>：原来的办法是在 <c>DocumentLockModeChanged</c> 里
+        /// <c>Veto()</c> 掉原生命令。取锁被否掉之后，CAD 仍把那条命令留在"正在执行"状态，命令行挂着
+        /// "文档正在执行命令，按回车取消或[重试]"；插件随即排队的 <c>X_PZ_EDIT</c> 只能排队等它结束 ——
+        /// 用户看到的就是"双击没弹出编辑框，按一下 Esc 才出来"。没有原生命令，就没有这条挂起提示。</para>
+        /// <para>原值在 <see cref="RestoreQuickPropertiesMode"/> 里还原（编辑命令结束、取消、卸载等所有出口都会走）。</para></summary>
+        private static void SuppressDoubleClickEdit()
+        {
+            if (_doubleClickEditSuppressed) return;
+            try
+            {
+                var value = CadApplication.GetSystemVariable("DBLCLKEDIT");
+                if (Convert.ToInt32(value) == 0) return;      // 本来就是 0：不需要改，也没有要还原的
+                _savedDoubleClickEdit = value;
+                CadApplication.SetSystemVariable("DBLCLKEDIT", 0);
+                _doubleClickEditSuppressed = true;
+                PluginLog.Info("DoubleClick.SuppressDBLCLKEDIT", "双击期间临时把 DBLCLKEDIT 置 0（原值 " + value + "）。");
+            }
+            catch (System.Exception ex) { PluginLog.Error("DoubleClick.SuppressDBLCLKEDIT", ex); }
+        }
+
+        /// <summary>还原双击期间临时关掉的 DBLCLKEDIT。失败也不能影响后续流程。
+        /// <para>编辑命令一进来就调用一次（见 <c>X_PZ_EDIT</c>）：<b>早还原</b>才不会因为编辑窗被人为留住、
+        /// 命令异常退出而让用户的"双击编辑"能力长期失效。QPMODE 不能同时还原（预选还在，会弹快捷特性），
+        /// 所以这两件事不绑在一起。</para></summary>
+        internal static void RestoreDoubleClickEdit()
+        {
+            if (!_doubleClickEditSuppressed) return;
+            var value = _savedDoubleClickEdit;
+            _savedDoubleClickEdit = null;
+            _doubleClickEditSuppressed = false;
+            try { CadApplication.SetSystemVariable("DBLCLKEDIT", value ?? 1); }
+            catch (System.Exception ex) { PluginLog.Error("DoubleClick.RestoreDBLCLKEDIT", ex); }
+        }
+
         private static void SuppressQuickPropertiesMode()
         {
             if (_quickPropertiesSuppressed) return;
@@ -810,9 +1012,12 @@ namespace XAnnotation
             catch (System.Exception ex) { PluginLog.Error("DoubleClick.SuppressQuickProperties", ex); }
         }
 
-        /// <summary>编辑命令取得实体后恢复用户原有的 QPMODE，不永久改写 CAD 偏好。</summary>
+        /// <summary>编辑命令取得实体后恢复用户原有的 QPMODE，不永久改写 CAD 偏好。
+        /// <para>双击期间临时改过的 <c>DBLCLKEDIT</c> 在这里一并还原：凡是"这一轮双击结束了"的出口
+        /// （命令执行完、用户取消、切图、卸载）都会走到本方法，两个变量始终成对恢复。</para></summary>
         internal static void RestoreQuickPropertiesMode()
         {
+            RestoreDoubleClickEdit();
             if (!_quickPropertiesSuppressed) return;
             var mode = _savedQuickPropertiesMode;
             _savedQuickPropertiesMode = null;

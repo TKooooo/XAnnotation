@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -44,32 +44,41 @@ namespace XAnnotation
         private const string DataKey = "LA_PZ_DATA";
 
         /// <summary>计算实际生效的字体、云线等参数。
-        /// <para>比例选型（设置里的 1:N）＝出图比例分母 N，作用是把"打印到纸上的毫米"换算成图面单位：</para>
-        /// <para>• 未勾选自适应：字高(图面) = 打印字高(mm) × N，云线半径(图面) = 打印云线半径(mm) × N；</para>
-        /// <para>• 勾选自适应：字高按云线对角线 × 百分比算，云线半径 = 字高 × 0.75，此时 N 不参与（自适应本身就与比例无关）。</para>
+        /// <para>换算基准是"1 毫米 = 多少图形单位"（<see cref="DrawingScale"/> 识别出的图面比例；识别不出来时用设置里的 1:N）：</para>
+        /// <para>• 云线半径/线宽：<b>始终</b> = 打印尺寸(mm) × 该系数。弧瓣大小只跟图纸比例有关，框选范围只影响瓣数
+        /// （<c>CloudSpacing</c> 按周长定瓣数），所以总图上框住整张图也不会出现"大波浪"。</para>
+        /// <para>• 字高：勾选字体自适应且图面单位口径一致时按云线对角线 × 百分比算；否则 = 打印字高(mm) × 系数。</para>
         /// <para>设置窗口里"从下拉选比例"会自动取消两个自适应勾选，所以两种算法不会互相打架。</para></summary>
         public static AnnotationSettings ResolveEffectiveSettings(Document doc, AnnotationSettings source, AnnotationData data, double cloudDiagonal = 0, bool captureRenderSettings = false)
         {
             var s=source.Clone();
             var scale=source.ScaleRatio>0?source.ScaleRatio:1.0; // 出图比例分母（1:100 → 100）：打印 mm → 图面单位
+            // 图面单位不一定是毫米：总图/场地图常用米（车位间距 2.4、建筑 14 就是 2.4m、14m）。
+            // 那种图上"比例选型 1:N"会把尺寸整体放大 1000 倍，字高与云线弧瓣都会离谱。
+            // 用图内文字字高识别出的系数顶上（两者相差不足 5 倍时仍尊重用户选的比例）。
+            var detected=DrawingScale.UnitsPerMillimeter(doc);
+            var unitMismatch=detected>0&&(detected>scale*5.0||detected*5.0<scale);
+            // "1 毫米 = 多少图形单位"就是这张图的实际比例。识别到图内文字、且和比例选型差 5 倍以上时
+            // 以识别值为准（米制总图就是这样被救回来的）；两者一致时尊重用户选的比例。
+            var unitsPerMm=unitMismatch?detected:scale;
             var rawText=Math.Max(source.TextHeight,0.1);          // 打印字高（mm）
             var refSize=cloudDiagonal;
             if(refSize<=0){using(var view=doc.Editor.GetCurrentView())refSize=view.Height;}
             var adaptiveText=Math.Max(0.1,refSize*Math.Max(0.1,source.AutoTextViewPercent)/100.0);
-            var text=source.FontAutoFit?adaptiveText:rawText*scale;
+            // 按框大小的自适应只在"框能代表图面尺度"时成立。单位对不上时框往往也一并被放大过
+            // （总图缩到全图范围框选，框就是几百万单位），这时改按图面换算取尺寸，
+            // 否则字高会跟着框一起膨胀。
+            var text=(source.FontAutoFit&&!unitMismatch)?adaptiveText:rawText*unitsPerMm;
             var factor=text/rawText; // 相对"打印字高"的放大倍数：首行/次行/固定宽度/对勾高度沿用同一倍数
             s.TextHeight=text;s.HeaderHeight=Math.Max(0.1,source.HeaderHeight*factor);s.SecondLineHeight=Math.Max(0.1,source.SecondLineHeight*factor);
             s.FixedWidthValue=Math.Max(text*6,source.FixedWidthValue*factor);
-            if(source.CloudAutoFit)
-            {
-                s.CloudRadius=Math.Max(0.001,adaptiveText*0.75);
-                s.LineWidth=Math.Max(0.001,adaptiveText*0.035);
-            }
-            else
-            {
-                s.CloudRadius=Math.Max(0.001,source.CloudRadius*scale);
-                s.LineWidth=Math.Max(0,source.LineWidth*scale);
-            }
+            // 云线弧瓣：**始终按图纸比例**（打印半径 mm × 单位系数），不再跟着框一起膨胀。
+            // 弧瓣大小是"出图后纸上的尺寸"，本来就该只由图面比例决定；框选得大只代表瓣数多
+            // （见 CloudSpacing，它按周长定瓣数、每瓣仍约 2×半径）。原来的"自适应 = 半径取框对角线
+            // 的百分之几"在总图上一框就上百万单位，半径被撑到十几万，画出来是一条大波浪——
+            // 这就是总图上"云线比例不对"的根因。
+            s.CloudRadius=Math.Max(0.001,source.CloudRadius*unitsPerMm);
+            s.LineWidth=Math.Max(0,source.LineWidth*unitsPerMm);
             s.CheckHeight=Math.Max(source.CheckHeight*factor,text*2);if(captureRenderSettings&&data!=null){data.RenderTextHeight=s.TextHeight;data.RenderHeaderHeight=s.HeaderHeight;data.RenderSecondLineHeight=s.SecondLineHeight;data.RenderCloudRadius=s.CloudRadius;data.RenderLineWidth=s.LineWidth;}return s;
         }
 
@@ -85,20 +94,60 @@ namespace XAnnotation
         /// 面板中改外形/选项能立刻反映到预览上。</para></summary>
         public static bool PromptGeometry(Document doc, AnnotationSettings s, out Point3d firstPoint, out Point3d secondPoint)
         {
-            firstPoint=Point3d.Origin;secondPoint=Point3d.Origin;var ed = doc.Editor;object ortho=null,osmode=null;
-            try{
-                if(s.AutoCloseOrtho){ortho=CadSystemVariable("ORTHOMODE");SetCadSystemVariable("ORTHOMODE",0);}if(s.AutoCloseSnap){osmode=CadSystemVariable("OSMODE");SetCadSystemVariable("OSMODE",0);}
-                var firstJig=new FirstCornerPromptJig("\n指定批注范围第一个角点: ");
-                var firstResult=ed.Drag(firstJig);
-                if(firstJig.Aborted){ed.WriteMessage("\n绘制选项已更改，本轮按新选项重新开始。");return false;}
-                if(firstResult.Status!=PromptStatus.OK)return false;
-                var firstWcs=firstJig.Current.TransformBy(GetUcsMatrix(doc));
-                var region=new RegionPreviewJig(doc,firstWcs,s);var regionResult=ed.Drag(region);
+            firstPoint = Point3d.Origin; secondPoint = Point3d.Origin;
+            // 入口守卫：文档/编辑器拿不到时直接退出，别把 null 带进 Drag（现场出现过
+            // "[X_PZ_DRAW] NullReferenceException 在 PromptGeometry"，栈里只有这一层，
+            // 说明是在这一句里炸的，正好对应"从清单点新建批注没反应"）。
+            if (doc == null || doc.IsDisposed) { PluginLog.Warning("PromptGeometry", "没有可用的图纸，已取消。"); return false; }
+            var ed = doc.Editor;
+            if (ed == null) { PluginLog.Warning("PromptGeometry", "文档没有可用的编辑器（Editor 为空），已取消。"); return false; }
+            if (s == null) s = SettingsStore.Load();
+
+            object ortho = null, osmode = null;
+            var step = "识别图面单位";
+            try
+            {
+                // 进入交互前先识别一次图面单位（要开事务扫文字，不能放在拖拽回调里）。
+                DrawingScale.Ensure(doc);
+                step = "关闭正交/捕捉";
+                if (s.AutoCloseOrtho) { ortho = CadSystemVariable("ORTHOMODE"); SetCadSystemVariable("ORTHOMODE", 0); }
+                if (s.AutoCloseSnap) { osmode = CadSystemVariable("OSMODE"); SetCadSystemVariable("OSMODE", 0); }
+                step = "取第一个角点";
+                var firstJig = new FirstCornerPromptJig("\n指定批注范围第一个角点: ");
+                var firstResult = ed.Drag(firstJig);
+                if (firstJig.Aborted) { ed.WriteMessage("\n绘制选项已更改，本轮按新选项重新开始。"); return false; }
+                if (firstResult.Status != PromptStatus.OK) return false;
+                // 拖拽 Jig 的采样点本身已经是 WCS（见 FirstCornerPromptJig 的注释，MoveAnnotation 也按 WCS 用），
+                // 这里**不能再乘 UCS 矩阵**：图纸带旋转/远原点 UCS（总图很常见，UCS 原点在几百万的测量坐标上）时，
+                // 乘一次就会把点甩到几百万单位之外，框选范围被撑成"巨无霸"，云线看着就像比例全错。
+                var firstWcs = firstJig.Current;
+                step = "拖拽云线范围";
+                var region=new RegionPreviewJig(doc,firstWcs,s);PromptResult regionResult;try{regionResult=ed.Drag(region);}finally{PreviewTransient.Clear();}
                 if(region.Aborted){ed.WriteMessage("\n绘制选项已更改，本轮按新选项重新开始。");return false;}
                 if(regionResult.Status!=PromptStatus.OK)return false;
                 var (_,regionWidth,regionHeight)=UcsAlignedExtents(doc,firstWcs,region.Current);if(regionWidth<=1e-6||regionHeight<=1e-6){ed.WriteMessage("\n批注范围必须同时具有宽度和高度，请重新指定。");return false;}
+                // 留痕：UCS 非世界坐标的图纸（总图/带测量坐标）出过"云线甩到几百万单位外"的问题，
+                // 这条日志能一眼看出是选点还是换算出的错。
+                PluginLog.Info("PromptGeometry",
+                    "角点 WCS=(" + firstWcs.X.ToString("0.###") + "," + firstWcs.Y.ToString("0.###") + ")-(" +
+                    region.Current.X.ToString("0.###") + "," + region.Current.Y.ToString("0.###") + ")  UCS 对齐尺寸=" +
+                    regionWidth.ToString("0.###") + "x" + regionHeight.ToString("0.###"));
                 firstPoint=firstWcs;secondPoint=region.Current;return true;
-            }finally{if(ortho!=null)SetCadSystemVariable("ORTHOMODE",ortho);if(osmode!=null)SetCadSystemVariable("OSMODE",osmode);}
+            }
+            catch (System.Exception ex)
+            {
+                // 带上"卡在哪一步"：以前只写 PromptGeometry，栈里看不出是选点、拖拽还是换算出的错。
+                PluginLog.Error("PromptGeometry[" + step + "]", ex);
+                try { ed.WriteMessage("\n绘制批注失败（" + step + "）：" + ex.Message); } catch (System.Exception) { }
+                return false;
+            }
+            finally
+            {
+                try { if (ortho != null) SetCadSystemVariable("ORTHOMODE", ortho); }
+                catch (System.Exception ex) { PluginLog.Warning("PromptGeometry.RestoreOrtho", ex.Message); }
+                try { if (osmode != null) SetCadSystemVariable("OSMODE", osmode); }
+                catch (System.Exception ex) { PluginLog.Warning("PromptGeometry.RestoreOsnap", ex.Message); }
+            }
         }
 
         /// <summary>交互式选点（仅云线）：第一角点 → 拖拽云线范围，不要求文字框位置。</summary>
@@ -110,6 +159,7 @@ namespace XAnnotation
         /// <see cref="InteractionAbort"/> 干净中止（<c>GetPoint</c> 是黑盒，外部中止不了）。</para></summary>
         public static bool PromptBasePoint(Document doc, out Point3d basePoint)
         {
+            DrawingScale.Ensure(doc);
             basePoint = Point3d.Origin;
             var ed = doc.Editor;
             var jig = new FirstCornerPromptJig("\n指定批注基点: ");
@@ -121,7 +171,8 @@ namespace XAnnotation
             }
 
             if (result.Status != PromptStatus.OK) return false;
-            basePoint = jig.Current.TransformBy(GetUcsMatrix(doc));
+            // 同 PromptGeometry：Jig 采样点是 WCS，不要再过一遍 UCS 矩阵。
+            basePoint = jig.Current;
             return true;
         }
 
@@ -131,9 +182,29 @@ namespace XAnnotation
 
         private static CloudPromptResult PromptCloud(Document doc, AnnotationSettings s, bool allowFinish, IList<Point3d> historyFirsts, IList<Point3d> historySeconds, out Point3d firstPoint, out Point3d secondPoint)
         {
+            DrawingScale.Ensure(doc);
             firstPoint=Point3d.Origin;secondPoint=Point3d.Origin;var ed=doc.Editor;object ortho=null,osmode=null;
             try{
                 if(s.AutoCloseOrtho){ortho=CadSystemVariable("ORTHOMODE");SetCadSystemVariable("ORTHOMODE",0);}if(s.AutoCloseSnap){osmode=CadSystemVariable("OSMODE");SetCadSystemVariable("OSMODE",0);}
+                // 本轮"已经确认过"的云线交给瞬态层画：留在 Jig 的 WorldDraw 里画会被拖拽管线
+                // 按 50% 透明度合成，用户看到的就是"刚画完的云线又变成淡显"。瞬态图形不走那条管线，
+                // 是纯实色。这里一次建好，拖拽期间不再碰数据库/编辑器（WorldDraw 里不允许）。
+                if(PreviewTransient.Enabled&&historyFirsts!=null&&historySeconds!=null&&historyFirsts.Count>0)
+                {
+                    var historyUcsToWcs=GetUcsMatrix(doc);
+                    PreviewTransient.SetHistory(RegionPreviewDrawing.BuildHistory(
+                        doc,
+                        CloudBulgeSign(doc,Vector3d.ZAxis.TransformBy(historyUcsToWcs)),
+                        historyUcsToWcs,
+                        historyUcsToWcs.Inverse(),
+                        s,
+                        historyFirsts,
+                        historySeconds).ToArray());
+                    // 瞬态图形要等下一次屏幕刷新才画出来；这里主动刷一次，免得"刚确认的云线"
+                    // 在下一个提示挂起、用户还没动鼠标时看着像是没画。
+                    try { ed.UpdateScreen(); }
+                    catch (System.Exception ex) { PluginLog.Warning("PromptCloud.UpdateScreen", ex.Message); }
+                }
                 while(true)
                 {
                     Point3d firstWcs;
@@ -181,7 +252,9 @@ namespace XAnnotation
                         s,
                         historyFirsts,
                         historySeconds);
-                    var regionResult = ed.Drag(region);
+                    PromptResult regionResult;
+                    try { regionResult = ed.Drag(region); }
+                    finally { PreviewTransient.Clear(); }
                     if (region.Aborted)
                     {
                         ed.WriteMessage("\n绘制选项已更改，本轮按新选项重新开始。");
@@ -200,7 +273,7 @@ namespace XAnnotation
                     }
                     firstPoint=firstWcs;secondPoint=region.Current;return CloudPromptResult.Completed;
                 }
-            }finally{if(ortho!=null)SetCadSystemVariable("ORTHOMODE",ortho);if(osmode!=null)SetCadSystemVariable("OSMODE",osmode);}
+            }finally{PreviewTransient.ClearHistory();if(ortho!=null)SetCadSystemVariable("ORTHOMODE",ortho);if(osmode!=null)SetCadSystemVariable("OSMODE",osmode);}
         }
 
         /// <summary>仅创建云线（不含文字、引线、边框），返回实体 ObjectId。</summary>
@@ -268,6 +341,7 @@ namespace XAnnotation
                 var group=new Group("X-批注 "+data.Number,true);
                 groups.SetAt(GroupPrefix+data.Id,group);tr.AddNewlyCreatedDBObject(group,true);group.Append(ids);
                 WriteMaster(group,tr,data);
+                LogCreatedAnnotation(doc, tr, group, settings, "CreatePlineCloud");
                 tr.Commit();
                 ArchiveRecord(doc, "创建", data, null);
             }
@@ -334,6 +408,7 @@ namespace XAnnotation
                 var group=new Group("X-批注 "+data.Number,true);
                 groups.SetAt(GroupPrefix+data.Id,group);tr.AddNewlyCreatedDBObject(group,true);group.Append(ids);
                 WriteMaster(group,tr,data);
+                LogCreatedAnnotation(doc, tr, group, settings, "CreateMultiCloud");
                 tr.Commit();
                 ArchiveRecord(doc, "创建", data, null);
             }
@@ -816,6 +891,12 @@ namespace XAnnotation
         /// <paramref name="spaceId"/> 为空时写入当前空间；导入按原坐标还原时传入原批注所在布局的空间 Id。</summary>
         public static bool Create(Document doc, AnnotationData data, AnnotationSettings settings, Point3d firstPoint, Point3d secondPoint, Point3d textLocation, ObjectId spaceId = default(ObjectId))
         {
+            DrawingScale.Ensure(doc);
+            // 落图尺寸留痕：总图上"云线比例不对"这类反馈，靠这条日志能直接判断是比例识别还是框选范围的问题。
+            PluginLog.Info("Create",
+                "字高=" + settings.TextHeight.ToString("0.###") + " 云线半径=" + settings.CloudRadius.ToString("0.###") +
+                " 线宽=" + settings.LineWidth.ToString("0.###") + " 1mm=" +
+                DrawingScale.UnitsPerMillimeter(doc).ToString("0.###") + " 图形单位");
             using (doc.LockDocument()) using (var tr = doc.Database.TransactionManager.StartTransaction())
             {
                 EnsureRegApp(doc.Database, tr); EnsureLayer(doc.Database, tr, settings,data);
@@ -842,6 +923,7 @@ namespace XAnnotation
                 var group = new Group("X-批注 " + data.Number, true);
                 groups.SetAt(GroupPrefix + data.Id, group); tr.AddNewlyCreatedDBObject(group, true); group.Append(ids);
                 WriteMaster(group, tr, data);
+                LogCreatedAnnotation(doc, tr, group, settings, "Create");
                 tr.Commit();
                 ArchiveRecord(doc, "创建", data, null);
                 return true;
@@ -1025,6 +1107,7 @@ namespace XAnnotation
                 var group = new Group("X-批注 " + data.Number, true);
                 groups.SetAt(GroupPrefix + data.Id, group); tr.AddNewlyCreatedDBObject(group, true); group.Append(ids);
                 WriteMaster(group, tr, data);
+                LogCreatedAnnotation(doc, tr, group, settings, "Create");
                 tr.Commit();
                 ArchiveRecord(doc, "创建", data, null);
                 return true;
@@ -2104,7 +2187,8 @@ namespace XAnnotation
             return entries; // GetAllAnnotations 已按编号排序
         }
 
-        /// <summary>轻量批注摘要，供列表面板展示。</summary>
+        /// <summary>轻量批注摘要，供列表面板展示。
+        /// <para>只读快照：列表每次刷新都整体重建，不实现 INotifyPropertyChanged。</para></summary>
         public sealed class AnnotationInfo
         {
             public string Id { get; set; }
@@ -2115,11 +2199,81 @@ namespace XAnnotation
             public string Date { get; set; }
             public string Status { get; set; }
             public string Content { get; set; }
+            /// <summary>图号（批注里登记的那一格，可能为空）。</summary>
+            public string DrawingNo { get; set; }
+            /// <summary>所在布局名（模型 / 布局1…），取不到为 null。</summary>
+            public string Layout { get; set; }
+            /// <summary>批注实体所在图层。</summary>
+            public string Layer { get; set; }
+            /// <summary>这条批注由哪些元素组成（cloud/box/leader/marker/text 的角色名集合）。</summary>
+            public List<string> ElementRoles { get; set; }
+            /// <summary>列表里的流水号（1 起，按编号数值排序后固定，筛选时不变）。</summary>
+            public int Seq { get; set; }
             public ObjectId GroupId { get; set; }
             public ObjectId FirstEntityId { get; set; }
+
+            /// <summary>组成元素的人话说明（"云线 · 文字框 · 引线"），详情区显示用。</summary>
+            public string ElementText
+            {
+                get
+                {
+                    if (ElementRoles == null || ElementRoles.Count == 0) return "—";
+                    var names = new List<string>();
+                    foreach (var role in ElementRoles)
+                    {
+                        var name = role == "cloud" ? "云线"
+                            : role == "box" ? "文字框"
+                            : role == "leader" ? "引线"
+                            : role == "marker" ? "基点"
+                            : role == "text" ? "文字"
+                            : role;
+                        if (!names.Contains(name)) names.Add(name);
+                    }
+                    return string.Join(" · ", names.ToArray());
+                }
+            }
+
+            /// <summary>意见摘要：正文压成一行（换行/连续空格折成单个空格），超长由界面省略号截断。</summary>
+            public string Summary
+            {
+                get
+                {
+                    var text = (Content ?? "").Replace("\\P", " ").Replace("\r", " ").Replace("\n", " ").Replace("\t", " ");
+                    while (text.IndexOf("  ", StringComparison.Ordinal) >= 0) text = text.Replace("  ", " ");
+                    return text.Trim();
+                }
+            }
+
+            /// <summary>图号为空时显示一个占位符，列里不会出现空白格。</summary>
+            public string DrawingNoDisplay
+            {
+                get { return string.IsNullOrWhiteSpace(DrawingNo) ? "—" : DrawingNo.Trim(); }
+            }
+
+            /// <summary>批注指纹（Id 前 8 位大写），排查"同编号多条/复制出来的批注"时用。</summary>
+            public string Fingerprint
+            {
+                get
+                {
+                    var id = Id ?? "";
+                    return id.Length <= 8 ? id.ToUpperInvariant() : id.Substring(0, 8).ToUpperInvariant();
+                }
+            }
+
+            /// <summary>是否属于给定状态分组（"待处理" 分组也接收空值/未知状态，免得旧批注在列表里"消失"）。</summary>
+            public bool IsStatus(string status)
+            {
+                if (string.IsNullOrEmpty(status)) return true;
+                if (string.Equals(status, "待处理", StringComparison.Ordinal))
+                    return string.IsNullOrWhiteSpace(Status) || string.Equals(Status, "待处理", StringComparison.Ordinal);
+                return string.Equals(Status, status, StringComparison.Ordinal);
+            }
         }
 
-        /// <summary>扫描当前 DWG 中现有批注编号，返回最大「X-」编号+1（无批注时=1）。</summary>
+        /// <summary>扫描当前 DWG 中现有批注编号，返回最大序号+1（无批注时=1）。
+        /// <para>编号前缀可由用户配置（<see cref="AnnotationSettings.NumberPrefix"/>），这里<b>不看前缀</b>，
+        /// 一律取编号末尾的连续数字（<see cref="AnnotationNumbering.TrailingNumber"/>）：
+        /// 换了前缀以后新图从 1 开始也不会与旧编号撞号，前缀自己带数字（"A1-7"）也不会解析错。</para></summary>
         public static int GetNextNumber(Document doc)
         {
             if (doc == null || doc.IsDisposed) return 1;
@@ -2134,9 +2288,8 @@ namespace XAnnotation
                     if (!(tr.GetObject(entry.Value, OpenMode.ForRead) is Group group)) continue;
                     if (TryReadMaster(group, tr, out var data) && !string.IsNullOrWhiteSpace(data.Number))
                     {
-                        var number = data.Number.Trim();
-                        var numericPart = number.StartsWith("X-", StringComparison.OrdinalIgnoreCase) ? number.Substring(3) : number;
-                        if (int.TryParse(numericPart, out var parsed) && parsed > max) max = parsed;
+                        var parsed = AnnotationNumbering.TrailingNumber(data.Number.Trim());
+                        if (parsed > max) max = parsed;
                     }
                 }
             }
@@ -2184,6 +2337,7 @@ namespace XAnnotation
             {
                 using (var tr = doc.Database.TransactionManager.StartTransaction())
                 {
+                    var layoutCache = new Dictionary<ObjectId, string>();
                     var groups = (DBDictionary)tr.GetObject(doc.Database.GroupDictionaryId, OpenMode.ForRead);
                     foreach (var entry in groups)
                     {
@@ -2193,19 +2347,116 @@ namespace XAnnotation
                         if (!TryReadMaster(group, tr, out var data)) continue;
                         var ids = group.GetAllEntityIds();
                         ObjectId firstId = ObjectId.Null;
-                        foreach (ObjectId oid in ids) { if (oid.IsValid && !oid.IsErased) { firstId = oid; break; } }
+                        var roles = new List<string>();
+                        foreach (ObjectId oid in ids)
+                        {
+                            if (!oid.IsValid || oid.IsErased) continue;
+                            if (firstId.IsNull) firstId = oid;
+                            // 顺手统计组成元素（详情区要显示"云线 · 文字框 · 引线"）；读不到就跳过。
+                            if (roles.Count < 6)
+                            {
+                                try
+                                {
+                                    if (tr.GetObject(oid, OpenMode.ForRead, false) is Entity member
+                                        && TryGetRole(member, out var memberRole)
+                                        && !string.IsNullOrEmpty(memberRole) && !roles.Contains(memberRole))
+                                    {
+                                        roles.Add(memberRole);
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
                         if(firstId.IsNull)continue;
+                        // 图层 / 布局是"这条批注落在哪"的信息，列表详情要用；取不到不影响列表本身。
+                        string layer = null, layout = null;
+                        try
+                        {
+                            if (tr.GetObject(firstId, OpenMode.ForRead, false) is Entity first)
+                            {
+                                layer = first.Layer;
+                                layout = LayoutNameOf(tr, first, layoutCache);
+                            }
+                        }
+                        catch { }
                         result.Add(new AnnotationInfo
                         {
                             Id = data.Id, Number = data.Number, Discipline = data.Discipline,
                             Author = data.Author, Role = data.Role, Date = data.Date, Status = data.Status,
-                            Content = data.Content, GroupId = group.ObjectId, FirstEntityId = firstId
+                            Content = data.Content, DrawingNo = data.DrawingNo,
+                            Layer = layer, Layout = layout, ElementRoles = roles,
+                            GroupId = group.ObjectId, FirstEntityId = firstId
                         });
                     }
                 }
             }
             catch { }
-            return result.OrderBy(x => x.Number, StringComparer.OrdinalIgnoreCase).ToList();
+            // 按编号里的数字排（X-2 排在 X-10 前面），字符串排序会把它排到后面去。
+            var ordered = result
+                .OrderBy(x => NumberValue(x.Number))
+                .ThenBy(x => x.Number ?? "", StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            for (var i = 0; i < ordered.Count; i++) ordered[i].Seq = i + 1;
+            return ordered;
+        }
+
+        /// <summary>取编号里的数字部分（"X-012" → 12）。解析不出来时排到最后。</summary>
+        private static int NumberValue(string number)
+        {
+            if (string.IsNullOrEmpty(number)) return int.MaxValue;
+            var digits = new string(number.Where(char.IsDigit).ToArray());
+            return int.TryParse(digits, out var value) ? value : int.MaxValue;
+        }
+
+        /// <summary>只改批注状态（列表里的「标记已处理」等快捷操作）。
+        /// <para>走 <see cref="Update"/> 而不是直接改写 XRecord：状态着色、"已回复/已完成"整条换色、
+        /// 变更留痕都在 Update 里，绕过去会让图面颜色和记录对不上。</para>
+        /// <para>返回值是<b>失败原因</b>（空串/ null = 成功），供界面直接告诉用户卡在哪一步；
+        /// <paramref name="changed"/> 表示图上是否真的改了。</para></summary>
+        public static string SetStatus(Document doc, ObjectId entityId, string status, out bool changed)
+        {
+            changed = false;
+            if (doc == null || doc.IsDisposed) return "当前没有可用的图纸。";
+            if (entityId.IsNull || !entityId.IsValid) return "批注实体已不存在，请刷新列表。";
+            if (entityId.IsErased) return "批注已经被删除，请刷新列表。";
+            if (string.IsNullOrWhiteSpace(status)) return "状态值为空。";
+            try
+            {
+                AnnotationData data;
+                using (doc.LockDocument())
+                using (var tr = doc.Database.TransactionManager.StartTransaction())
+                {
+                    if (!(tr.GetObject(entityId, OpenMode.ForRead) is Entity entity)) return "批注实体已不存在，请刷新列表。";
+                    if (!TryReadFromEntity(tr, entity, out data) || data == null)
+                    {
+                        PluginLog.Warning("AnnotationSetStatus", "实体 " + entityId + " 找不到批注数据（编组与 XData 都读不出来）。");
+                        return "这条批注的数据读不出来（编组可能已被炸开），可先运行 X_PZ_REPAIR 修复。";
+                    }
+                    tr.Commit();
+                }
+
+                if (string.Equals(data.Status, status, StringComparison.Ordinal))
+                {
+                    changed = true;           // 已经是这个状态：当作成功，界面不必报错
+                    return "";
+                }
+
+                data.Status = status;
+                if (!Update(doc, entityId, data))
+                {
+                    PluginLog.Warning("AnnotationSetStatus", "Update 返回 false（实体=" + entityId + "，目标状态=" + status + "）。");
+                    return "编辑这条批注失败（编组内容不完整），可先运行 X_PZ_REPAIR 修复。";
+                }
+
+                changed = true;
+                try { doc.Editor.UpdateScreen(); } catch (System.Exception) { }
+                return "";
+            }
+            catch (System.Exception ex)
+            {
+                PluginLog.Error("AnnotationSetStatus", ex);
+                return ex.Message;
+            }
         }
 
         /// <summary>
@@ -3171,9 +3422,10 @@ namespace XAnnotation
                 fixedAnchor);
             try
             {
-                var result = doc.Editor.Drag(jig);
-                return InteractionResult.From(
-                    result,
+                PromptResult result;
+                try { result = doc.Editor.Drag(jig); }
+                finally { PreviewTransient.Clear(); }
+                return InteractionResult.From(                    result,
                     "批注框定位",
                     jig.Current);
             }
@@ -3217,6 +3469,7 @@ namespace XAnnotation
             }
             finally
             {
+                PreviewTransient.Clear();
                 if (ortho != null) SetCadSystemVariable("ORTHOMODE", ortho);
                 if (osmode != null) SetCadSystemVariable("OSMODE", osmode);
             }
@@ -3454,6 +3707,21 @@ namespace XAnnotation
             var spaced = total * (lines <= 1 ? 1.0 : 1.7);
             return Math.Max(settings.TextHeight * 2.0, spaced);
         }
+        /// <summary>云线弧瓣弦长。未自适应时 = 2×半径（老算法）；自适应时按周长定瓣数，每瓣仍是 2×半径，
+        /// 只让数量随框大小增减。
+        /// <para>原来自适应是"按字高的 1.2 倍定瓣数、封顶 160 瓣"：字高一旦相对图面偏大（图形单位不是毫米的
+        /// 总图就是这种情况），瓣数被压到下限、每瓣又被拉得很长，画出来是一条大波浪而不是云线——
+        /// 这正是总图上"云线比例不对"的来源。改成按半径定，弧瓣永远和设置里的半径一致。</para></summary>
+        private static double CloudSpacing(double perimeter, AnnotationSettings settings, double fallback)
+        {
+            if(!settings.CloudAutoFit) return fallback;
+            var radius=Math.Max(settings.CloudRadius,1e-6);
+            var desired=(int)Math.Ceiling(perimeter/Math.Max(radius*2.0,1e-6));
+            if(desired<20)desired=20;
+            if(desired>400)desired=400;
+            return perimeter/desired;
+        }
+
         /// <summary>构建云线多段线，支持矩形/菱形/椭圆三种外形，开启 CloudAutoFit 时自适应弧段数。</summary>
         internal static Polyline BuildCloud(Point2d min, Point2d max, AnnotationSettings settings)
         {
@@ -3462,11 +3730,11 @@ namespace XAnnotation
             var perimeter=ComputePerimeter(w,h,settings.Shape);
             if(perimeter<1e-9){var empty=new Polyline();empty.AddVertexAt(0,min,0,0,0);empty.AddVertexAt(1,max,0,0,0);return empty;}
             var spacing=Math.Max(0.1,radius*2);
-            if(settings.CloudAutoFit){var desired=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/Math.Max(settings.TextHeight*1.2,0.1))));spacing=perimeter/desired;}
+            spacing=CloudSpacing(perimeter,settings,spacing);
             // 菱形：使用框选云线专用的四边细分，不进入 PL 多边形校验。
             if(settings.Shape=="菱形"){var cx=(min.X+max.X)/2;var cy=(min.Y+max.Y)/2;return BuildRegionCloudPath(new[]{new Point2d(cx,min.Y),new Point2d(max.X,cy),new Point2d(cx,max.Y),new Point2d(min.X,cy)},spacing,settings.CloudStyle,settings.LineWidth);}
             // 椭圆：自适应采样点数
-            if(settings.Shape=="椭圆"){var cx=(min.X+max.X)/2;var cy=(min.Y+max.Y)/2;var rx=w/2;var ry=h/2;var count=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/spacing)));var points=new List<Point2d>();for(var i=0;i<count;i++){var a=2*Math.PI*i/count;points.Add(new Point2d(cx+rx*Math.Cos(a),cy+ry*Math.Sin(a)));}return BuildScallopedVertices(points,settings.CloudStyle,settings.LineWidth);}
+            if(settings.Shape=="椭圆"){var cx=(min.X+max.X)/2;var cy=(min.Y+max.Y)/2;var rx=w/2;var ry=h/2;var count=Math.Max(20,Math.Min(400,(int)Math.Ceiling(perimeter/spacing)));var points=new List<Point2d>();for(var i=0;i<count;i++){var a=2*Math.PI*i/count;points.Add(new Point2d(cx+rx*Math.Cos(a),cy+ry*Math.Sin(a)));}return BuildScallopedVertices(points,settings.CloudStyle,settings.LineWidth);}
             // 矩形：按宽高分别均匀布点，与任意折点的 PL 云线算法完全分离。
             var nx=Math.Max(4,(int)Math.Ceiling(w/spacing));var ny=Math.Max(4,(int)Math.Ceiling(h/spacing));
             const int maxVertices=400;var total=2*(nx+ny);if(total>maxVertices){var scale=(double)maxVertices/total;nx=Math.Max(4,(int)Math.Floor(nx*scale));ny=Math.Max(4,(int)Math.Floor(ny*scale));}
@@ -3498,8 +3766,8 @@ namespace XAnnotation
                 var axisX=new Vector2d((corners[1].X-corners[0].X)/2,(corners[1].Y-corners[0].Y)/2);
                 var axisY=new Vector2d((corners[3].X-corners[0].X)/2,(corners[3].Y-corners[0].Y)/2);
                 var perimeter=Math.PI*(axisX.Length+axisY.Length)*1.05;var spacing=Math.Max(settings.CloudRadius*2,0.1);
-                if(settings.CloudAutoFit){var desired=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/Math.Max(settings.TextHeight*1.2,0.1))));spacing=perimeter/desired;}
-                var count=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/spacing)));var points=new List<Point2d>(count);
+                spacing=CloudSpacing(perimeter,settings,spacing);
+                var count=Math.Max(20,Math.Min(400,(int)Math.Ceiling(perimeter/spacing)));var points=new List<Point2d>(count);
                 for(var i=0;i<count;i++){var angle=2*Math.PI*i/count;points.Add(center+axisX*Math.Cos(angle)+axisY*Math.Sin(angle));}
                 return BuildScallopedVertices(points,settings.CloudStyle,settings.LineWidth);
             }
@@ -3513,7 +3781,7 @@ namespace XAnnotation
         {
             var spacing=Math.Max(settings.CloudRadius*2,0.1);
             var perimeter=0.0;for(var i=0;i<wcsCorners.Length;i++)perimeter+=wcsCorners[i].GetDistanceTo(wcsCorners[(i+1)%wcsCorners.Length]);
-            if(settings.CloudAutoFit){var desired=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/Math.Max(settings.TextHeight*1.2,0.1))));spacing=perimeter/desired;}
+            spacing=CloudSpacing(perimeter,settings,spacing);
             return BuildRegionCloudPath(wcsCorners,spacing,settings.CloudStyle,settings.LineWidth);
         }
 
@@ -3552,6 +3820,135 @@ namespace XAnnotation
         /// <summary>给定 4 个 WCS 角点，找离目标最近的角。</summary>
         internal static Point2d ClosestCorner4(Point2d[] corners,Point3d p){var target=new Point2d(p.X,p.Y);return corners.OrderBy(c=>c.GetDistanceTo(target)).First();}
         private static bool Contains(Group group,ObjectId id){foreach(ObjectId member in group.GetAllEntityIds())if(member==id)return true;return false;}
+
+        /// <summary>PICKSTYLE 的纠正提示只发一次，别每次落图都在命令行刷一遍。</summary>
+        private static bool _pickStyleFixedReported;
+
+        /// <summary>保证"点批注任意一处即整体选中"成立：<c>PICKSTYLE</c> 的<b>编组</b>位必须是 1。
+        /// <para><b>为什么必须由插件来做</b>：<c>PICKSTYLE</c> 是位标志（1=编组，2=关联填充），
+        /// 少 1 这一位时 CAD 完全不允许按编组选中 —— 一条批注虽然老老实实建了编组，
+        /// 用户点云线只亮云线、点文字只亮文字，看着就是"批注被炸开了"。
+        /// 这是<b>图级</b>设置（随 DWG 保存），老图纸里常被前人设成 0，靠用户自己去改系统变量不现实。</para>
+        /// <para>只补"编组"这一位，不动"关联填充"；值本来就是 1/3 时什么都不做。
+        /// 返回 <c>true</c> 表示这次真的改过（调用方据此刷新诊断值）。</para></summary>
+        internal static bool EnsureGroupPickStyle(Document doc)
+        {
+            try
+            {
+                var pick = Convert.ToInt32(CadSystemVariable("PICKSTYLE"));
+                if ((pick & 1) != 0) return false;      // 编组位已开，什么都不用做
+                var target = pick | 1;
+                SetCadSystemVariable("PICKSTYLE", target);
+                var now = Convert.ToInt32(CadSystemVariable("PICKSTYLE"));
+                if ((now & 1) == 0)                     // 没改成功（被宿主拒绝）：退回提示
+                {
+                    PluginLog.Warning("Annotation.PickStyle", "PICKSTYLE 由 " + pick + " 改为 " + target + " 未生效，实际仍为 " + now + "。");
+                    try
+                    {
+                        doc.Editor.WriteMessage(
+                            "\n提示：本图 PICKSTYLE=" + now + "，编组无法整体点选。请在命令行输入 PICKSTYLE，设为 1。");
+                    }
+                    catch { }
+                    return false;
+                }
+
+                PluginLog.Info("Annotation.PickStyle", "PICKSTYLE " + pick + " → " + now + "（补上编组整体选择）。");
+                if (!_pickStyleFixedReported)
+                {
+                    _pickStyleFixedReported = true;
+                    try
+                    {
+                        doc.Editor.WriteMessage(
+                            "\n已将本图 PICKSTYLE 由 " + pick + " 改为 " + now + "：点批注任意一处即可整体选中。");
+                    }
+                    catch { }
+                }
+                return true;
+            }
+            catch (System.Exception ex)
+            {
+                PluginLog.Warning("Annotation.PickStyle", ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>把"这条批注落图后的实际情况"写进运行日志（只写日志，不动图）。
+        /// <para><b>为什么需要</b>：现场反馈的两类问题——"点云线只选中文字框、不整体选中"和"云线看着零碎"——
+        /// 只能看实物判断。这里一次性记下 <c>PICKSTYLE</c>、编组是否可选择、成员数、云线的图层/线型/线宽/
+        /// 顶点数与首段弦长，出问题时直接看日志就能定位，不必让用户反复截图。</para></summary>
+        private static void LogCreatedAnnotation(Document doc, Transaction tr, Group group, AnnotationSettings settings, string stage)
+        {
+            try
+            {
+                var count = 0;
+                var cloudVertices = 0;
+                var cloudChord = 0.0;
+                var cloudWidth = 0.0;
+                var cloudLayer = "(无云线)";
+                var cloudLinetype = "?";
+                foreach (ObjectId oid in group.GetAllEntityIds())
+                {
+                    count++;
+                    Entity entity;
+                    try { entity = tr.GetObject(oid, OpenMode.ForRead, false) as Entity; }
+                    catch { continue; }
+                    var poly = entity as Polyline;
+                    // 云线是编组里顶点最多的那条多段线（引线只有 2 个顶点，文字框是闭合 4 段）。
+                    if (poly == null || poly.NumberOfVertices <= cloudVertices) continue;
+                    cloudVertices = poly.NumberOfVertices;
+                    cloudLayer = poly.Layer;
+                    cloudWidth = SafeConstantWidth(poly);
+                    try
+                    {
+                        if (cloudVertices > 1)
+                            cloudChord = poly.GetPoint2dAt(0).GetDistanceTo(poly.GetPoint2dAt(1));
+                    }
+                    catch { }
+                    try
+                    {
+                        if (tr.GetObject(poly.LinetypeId, OpenMode.ForRead) is LinetypeTableRecord lt) cloudLinetype = lt.Name;
+                    }
+                    catch { }
+                }
+
+                var pickStyle = "?";
+                try { pickStyle = Convert.ToInt32(CadSystemVariable("PICKSTYLE")).ToString(); }
+                catch { }
+
+                // PICKSTYLE 少了"编组"这一位时，CAD 不允许按编组整体点选：点云线只选中云线、
+                // 点文字框只选中文字 —— 现场表现就是"批注炸开了、不成组"。
+                // 这是图级设置（老图纸常被前人设成 0），插件每画一条就顺手纠正一次：只补这一位，
+                // 不碰"关联填充"那一位；纠正成功才刷新 diag 里的 PICKSTYLE。
+                if (EnsureGroupPickStyle(doc))
+                {
+                    try { pickStyle = Convert.ToInt32(CadSystemVariable("PICKSTYLE")).ToString(); }
+                    catch { }
+                }
+
+                PluginLog.Info("Annotation.Diag",
+                    stage + " 编组「" + group.Name + "」成员=" + count + " 可选择=" + GroupSelectable(group) +
+                    "；PICKSTYLE=" + pickStyle +
+                    "；云线 图层=" + cloudLayer + " 线型=" + cloudLinetype + " 线宽=" + cloudWidth.ToString("0.###") +
+                    " 顶点=" + cloudVertices + " 首段弦长=" + cloudChord.ToString("0.###") +
+                    "；设置 半径=" + settings.CloudRadius.ToString("0.###") + " 云线线宽=" + settings.LineWidth.ToString("0.###") +
+                    " 样式=" + settings.CloudStyle + " 比例选型=1:" + settings.ScaleRatio.ToString("0.###") +
+                    " 识别 1mm=" + DrawingScale.UnitsPerMillimeter(doc).ToString("0.###") + " 图形单位");
+            }
+            catch (System.Exception ex) { PluginLog.Warning("Annotation.Diag", ex.Message); }
+        }
+
+        /// <summary>编组的"可选择"标志：老图里可能存在不可选择的编组，
+        /// 那种编组点任何一个成员都只会选中该成员本身（现场表现就是"云线不成组"）。</summary>
+        private static string GroupSelectable(Group group)
+        {
+            try
+            {
+                var property = group.GetType().GetProperty("Selectable");
+                var value = property?.GetValue(group, null);
+                return value == null ? "?" : value.ToString();
+            }
+            catch { return "?"; }
+        }
         // 渐变云线：线宽走逐段顶点宽度（BuildScallopedVertices 已写入），ConstantWidth 必须保持 0，否则 0 宽度端回退用 ConstantWidth 会抹平渐变。
         private static void Add(BlockTableRecord space,Transaction tr,Entity e,ObjectIdCollection ids,AnnotationSettings s,string id,string role,short color,AnnotationData data=null,string layerOverride=null){e.Layer=string.IsNullOrEmpty(layerOverride)?EffectiveLayer(s,data):layerOverride;e.Color=Color.FromColorIndex(ColorMethod.ByAci,color);if(e is Polyline p&&s.LineWidth>0&&(role=="cloud"||role=="leader")){if(role=="leader"||s.CloudStyle!="渐变")p.ConstantWidth=s.LineWidth;}var rb=new ResultBuffer(new TypedValue((int)DxfCode.ExtendedDataRegAppName,AnnotationCodec.AppName),new TypedValue((int)DxfCode.ExtendedDataAsciiString,id),new TypedValue((int)DxfCode.ExtendedDataAsciiString,role));if(data!=null)foreach(var chunk in AnnotationCodec.BuildChunks(data))rb.Add(new TypedValue((int)DxfCode.ExtendedDataAsciiString,chunk));e.XData=rb;ids.Add(space.AppendEntity(e));tr.AddNewlyCreatedDBObject(e,true);}
         private static bool TryGetRole(Entity e,out string role){role=null;var rb=e.GetXDataForApplication(AnnotationCodec.AppName);if(rb==null)return false;var a=rb.AsArray();if(a.Length<3)return false;role=a[2].Value as string;return role!=null;}
@@ -3563,11 +3960,7 @@ namespace XAnnotation
             for(var i=0;i<corners.Count;i++){lengths[i]=corners[i].GetDistanceTo(corners[(i+1)%corners.Count]);perimeter+=lengths[i];}
 
             var spacing=Math.Max(settings.CloudRadius*2,0.1);
-            if(settings.CloudAutoFit)
-            {
-                var desired=Math.Max(20,Math.Min(160,(int)Math.Ceiling(perimeter/Math.Max(settings.TextHeight*1.2,0.1))));
-                spacing=perimeter/desired;
-            }
+            spacing=CloudSpacing(perimeter,settings,spacing);
 
             var minimumPerEdge=corners.Count<=4?4:1;
             var segmentCounts=lengths.Select(length=>Math.Max(minimumPerEdge,(int)Math.Ceiling(length/spacing))).ToArray();
