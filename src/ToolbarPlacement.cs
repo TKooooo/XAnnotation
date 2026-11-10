@@ -5,12 +5,12 @@ using System.Xml.Linq;
 
 namespace XAnnotation
 {
-    /// <summary>「X-批注」工具栏的摆放记录：停靠方向 + 浮动时的屏幕坐标 + 浮动行数。
-    /// <para><b>从 1.0.11（2026-11-10 第 2 版）起，AutoCAD 平台不再靠它还原位置</b>：
-    /// 工具栏改成了 CUI 正式工具栏（见 <see cref="ToolbarCui"/>），停靠方向与列内次序由 AutoCAD
-    /// 自己记在主 CUI 的工作空间里（<c>WSToolbar</c> 的 <c>dockrow</c>/<c>dockcolumn</c>），重启精确还原。
-    /// 这份文件仍保留两个用途：<b>①</b> 首次生成 cuix 时当作初始停靠方向（用户升级后位置不突变）；
-    /// <b>②</b> CUI 方案失败、退回 COM 建法时的位置记忆（那时只能记住停在哪条边）。</para>
+    /// <summary>「X-批注」工具栏的摆放记录：停靠方向（+ 浮动时的行数）。
+    /// <para><b>能记的只有"停在哪条边"</b>。列内的具体位置记不住 —— 这是宿主限制：<c>Dock(n)</c> 一律把
+    /// 新建的工具栏插到该停靠区最前面，停靠状态下的 <c>Left/Top</c> 是只读的行列索引（写进去读回来还是 0）。
+    /// 曾试过把工具栏做成 CUI 分部菜单、让 AutoCAD 自己记 <c>dockrow</c>：位置是记住了，
+    /// 但宿主每次启动都要解析那个 cuix，把 CAD 卡成假死（2026-11-10 回退，见 ToolbarInstaller.CleanupLegacyCui）。
+    /// <b>不要再走那条路。</b></para>
     /// <para><b>为什么不塞进 settings.xml</b>：那份文件是由
     /// <c>SettingsWindow.SharedSettings()</c> 的同一个对象<b>整份回写</b>的（关批注面板、保存设置都会写），
     /// 工具栏若另外拿一份读写，两边就会互相覆盖 —— 典型现象是"刚记住的摆放，关一下面板又变回去了"。
@@ -88,17 +88,13 @@ namespace XAnnotation
             }
         }
 
-        /// <summary>两份记录是否等价。方向之外，坐标与行数也一起比 —— 用户在同一个停靠区里
-        /// 上下拖动（列内偏移变了）也要能记下来。
-        /// <para>坐标用**完全相等**判定而不是"差 1 像素也算一样"：值都是直接从 AutoCAD 读回来的整数，
-        /// 不存在抖动；而 <c>Math.Abs(Left - other.Left)</c> 在 <see cref="int.MinValue"/>（没读到）参与运算时
-        /// 会溢出抛异常 —— 这个比较跑在 CAD 的 Idle 回调里，抛出去就是致命错误。</para></summary>
+        /// <summary>两份记录是否等价：只比停靠方向与浮动行数（Left/Top 已不再参与还原，见类注释）。
+        /// <para>比较跑在 CAD 的 Idle 回调里，任何抛出去的异常都会变成致命错误 ——
+        /// 所以这里刻意只做两个整数的比较，不碰 <see cref="int.MinValue"/> 的减法/取绝对值。</para></summary>
         public bool SameAs(ToolbarPlacement other)
         {
             if (other == null) return false;
-            if (Dock != other.Dock) return false;
-            if (Left != other.Left || Top != other.Top) return false;
-            return Rows == other.Rows;
+            return Dock == other.Dock && Rows == other.Rows;
         }
 
         public string Describe()

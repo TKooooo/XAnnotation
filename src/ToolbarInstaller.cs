@@ -66,39 +66,11 @@ namespace XAnnotation
             new ToolbarButtonSpec { Glyph = "历", Name = "历史", Help = "批注历史记录（留痕）", Command = "X_PZ_HISTORY" },
         };
 
-        /// <summary>按钮数量（CUI 生成时用来判断 cuix 要不要重建）。</summary>
-        internal static int ButtonCount
-        {
-            get { return Buttons.Length; }
-        }
-
-        /// <summary>宿主 <c>MenuGroups</c> COM 对象（CUI 生成器复用，免得它自己去碰宿主类型）。</summary>
+        /// <summary>宿主 <c>MenuGroups</c> COM 对象（撤掉旧版 CUI 分部菜单时要用）。</summary>
         internal static object GetMenuGroupsStatic()
         {
             try { return MenuInstaller.GetStatic(typeof(UiApplication), "MenuGroups"); }
             catch { return null; }
-        }
-
-        /// <summary>宿主 <c>AcadApplication</c> 对象（读 Support 目录要用）。</summary>
-        internal static object GetAcadApplicationObject()
-        {
-            return ResolveAcadApplication();
-        }
-
-        /// <summary>宿主版本串（如 <c>"24.1s (LMS Tech)"</c>），CUI 里写版本号用。</summary>
-        internal static string HostVersion
-        {
-            get
-            {
-                try { return Convert.ToString(CadApplication.Version) ?? ""; }
-                catch { return ""; }
-            }
-        }
-
-        /// <summary>按钮清单（CUI 生成器按同一份清单生成工具栏，改按钮只改这一处）。</summary>
-        internal static ToolbarButtonSpec[] GetButtons()
-        {
-            return Buttons;
         }
 
         private static bool _retryAttached;
@@ -243,19 +215,14 @@ namespace XAnnotation
             return false;
 #else
 #if AUTOCAD
-            // AutoCAD 平台优先走 CUI 正式工具栏：宿主会把它的停靠位置/列内次序记进工作空间，
-            // 用户拖到侧边竖排、重启后还在原处。COM 建法做不到这一点（Dock 一律插到该边最前面），
-            // 见 ToolbarCui 的说明。CUI 不可用时**退回** COM 建法，宁可不记位置也不能让工具栏消失。
-            string cuiMessage;
-            if (ToolbarCui.Ensure(out cuiMessage))
-            {
-                // 同一个会话里如果还留着旧版用 COM 建的同名工具栏（升级后没重启的情况），
-                // 会出现两条「X-批注」。顺手删掉那一条 —— 删失败也无所谓，重启后就没了。
-                RemoveLegacyComToolbar();
-                message = cuiMessage;
-                return true;
-            }
-            PluginLog.Warning("Toolbar.Cui", "CUI 方案不可用，改用 COM 建法（位置可能记不住）：" + cuiMessage);
+            // ★ 这里曾经走过一条"CUI 正式工具栏"的路（把 cuix 登记进主 CUI，让 AutoCAD 自己记位置）——
+            //   2026-11-10 已彻底废弃，**不要再加回来**：
+            //   把 XAnnotation.cuix 写进主 CUI 的 <PartialMenuFile> 之后，宿主**每次启动**都要先解析它，
+            //   现场症状是"CAD 启动卡好几分钟、像假死"（Windows 事件日志里是 Application Hang，
+            //   而且插件连 Initialize 都没跑到 —— 卡在原生启动阶段）。为一个"记住列内位置"的附加功能
+            //   去动用户的主 CUI，代价完全不成比例。
+            //   所以：启动时反而要把上一版留下的登记**撤掉**（CleanupLegacyCui），然后只用 COM 建工具栏。
+            CleanupLegacyCui();
 #endif
             try
             {
@@ -314,13 +281,7 @@ namespace XAnnotation
         {
             try
             {
-#if AUTOCAD
-                // CUI 工具栏挂在插件自己的菜单组里，不在宿主默认的 "Acad" 组；先找自己的组，
-                // 找不到（CUI 没加载成功、走的是 COM 建法）再回落到默认组。
-                var toolbars = GetToolbarsCollection(ToolbarCui.MenuGroupName) ?? GetToolbarsCollection(null);
-#else
                 var toolbars = GetToolbarsCollection(null);
-#endif
                 if (toolbars == null) { message = "当前 CAD 未公开工具栏接口。"; return false; }
                 var toolbar = TryGetToolbar(toolbars);
                 if (toolbar == null) return Ensure(out message);
@@ -338,20 +299,91 @@ namespace XAnnotation
             }
         }
 
-        /// <summary>删掉旧版用 COM 建的同名工具栏。只在改用 CUI 工具栏后调用，
-        /// 只查宿主默认菜单组（CUI 工具栏挂在插件自己的组里，不会误删）。</summary>
-        private static void RemoveLegacyComToolbar()
+        /// <summary>上一版（1.0.11 那次"CUI 工具栏"尝试）用过的菜单组名，撤登记时按它找。</summary>
+        private const string LegacyCuiMenuGroup = "XANNOTATION";
+
+        /// <summary>每个会话只清理一次（清理是"有就删、没有就过"，但没必要每次 Ensure 都去翻目录）。</summary>
+        private static bool _legacyCuiCleaned;
+
+        /// <summary>清掉上一版留在宿主里的 CUI 分部菜单登记与 cuix 残留。
+        /// <para><b>为什么必须清</b>：那一版把 <c>XAnnotation.cuix</c> 写进了主 CUI 的
+        /// <c>&lt;PartialMenuFile&gt;</c>，于是<b>每次启动 AutoCAD 都要先解析这个文件</b>，
+        /// 现场表现就是"CAD 启动卡很久 / 假死"（2026-11-10 16:30、16:31 两次 Application Hang）。
+        /// 现在工具栏改回 COM 建法，这份登记必须撤掉，否则用户即使升级插件也还是每次都卡。</para>
+        /// <para>撤登记交给宿主自己的 <c>MenuGroups.Unload</c>：它会把 <c>&lt;PartialMenuFile&gt;</c>
+        /// 和四个工作空间里的 <c>&lt;WSToolbar pUID="TB_XANNOT"&gt;</c> 一起删干净（实测），
+        /// 比自己改 acad.cuix 安全得多。再顺手删掉 Support 下的 cuix / mr 残留文件。
+        /// 全程 best-effort：任何一步失败只记日志，绝不影响工具栏本身。</para></summary>
+        private static void CleanupLegacyCui()
+        {
+            if (_legacyCuiCleaned) return;
+            _legacyCuiCleaned = true;
+
+            // ① 从主 CUI 注销分部菜单（没登记过时 Unload 会抛，属正常情况，不记日志）。
+            try
+            {
+                var menuGroups = GetMenuGroupsStatic();
+                if (menuGroups != null)
+                {
+                    try
+                    {
+                        menuGroups.InvokeMethod("Unload", LegacyCuiMenuGroup);
+                        PluginLog.Info("Toolbar.Cui.Cleanup",
+                            "已从主 CUI 注销上一版的分部菜单「" + LegacyCuiMenuGroup + "」。");
+                    }
+                    catch { /* 本来就没加载：最常见的情况，静默跳过 */ }
+                }
+            }
+            catch (Exception ex) { PluginLog.Warning("Toolbar.Cui.Cleanup", Describe(ex)); }
+
+            // ② 删掉 Support 目录里的 cuix / 编译产物残留（留着没有意义，还容易被 CAD 误当成可用菜单）。
+            try
+            {
+                var support = ResolveSupportFolder();
+                if (string.IsNullOrEmpty(support)) return;
+                var names = new[]
+                {
+                    "XAnnotation.cuix", "XAnnotation.cuix.tmp", "XAnnotation.cuix.build",
+                    "XAnnotation.mnr", "XAnnotation_light.mnr", "XAnnotationMNU.mnr"
+                };
+                var removed = 0;
+                foreach (var name in names)
+                {
+                    try
+                    {
+                        var file = Path.Combine(support, name);
+                        if (!File.Exists(file)) continue;
+                        File.Delete(file);
+                        removed++;
+                    }
+                    catch (Exception ex) { PluginLog.Warning("Toolbar.Cui.Cleanup.File", name + "：" + Describe(ex)); }
+                }
+                if (removed > 0)
+                    PluginLog.Info("Toolbar.Cui.Cleanup", "已删除 " + removed + " 个 CUI 残留文件（" + support + "）。");
+            }
+            catch (Exception ex) { PluginLog.Warning("Toolbar.Cui.Cleanup.File", Describe(ex)); }
+        }
+
+        /// <summary>CAD 的 Support 目录：从「主菜单文件」（Preferences → 文件 → 主自定义文件）反推，
+        /// 各版本 / 各语言都不同，硬编码路径一定会错。取不到返回 <c>null</c>。</summary>
+        private static string ResolveSupportFolder()
         {
             try
             {
-                var toolbars = GetToolbarsCollection(null);
-                if (toolbars == null) return;
-                var legacy = TryGetToolbar(toolbars);
-                if (legacy == null) return;
-                legacy.InvokeMethod("Delete");
-                PluginLog.Info("Toolbar.Legacy", "已删除旧版 COM 工具栏（改用 CUI 工具栏）。");
+                var app = ResolveAcadApplication();
+                if (app == null) return null;
+                var files = app.GetType().InvokeMember("Preferences", BindingFlags.GetProperty, null, app, null);
+                files = files.GetType().InvokeMember("Files", BindingFlags.GetProperty, null, files, null);
+                var menuFile = Convert.ToString(files.GetType().InvokeMember(
+                    "MenuFile", BindingFlags.GetProperty, null, files, null));
+                if (!string.IsNullOrWhiteSpace(menuFile))
+                {
+                    var folder = Path.GetDirectoryName(menuFile.Trim());
+                    if (!string.IsNullOrEmpty(folder) && Directory.Exists(folder)) return folder;
+                }
             }
-            catch (Exception ex) { PluginLog.Warning("Toolbar.Legacy", Describe(ex)); }
+            catch (Exception ex) { PluginLog.Warning("Toolbar.SupportDir", Describe(ex)); }
+            return null;
         }
 
         /// <summary>取某个菜单组下的 Toolbars 集合 COM 对象；宿主不支持时返回 <c>null</c>。
@@ -517,6 +549,12 @@ namespace XAnnotation
         /// "工具栏不可见"；只有 <c>Dock(0..3)</c> 之后它才会真的显示出来。
         /// <c>Dock(4)</c> 更不行 —— 会报"参数 Side 无效"。所以记录是浮动时退回默认（底部横排），
         /// 形状仍是横排一排，不会莫名其妙变成侧边竖排。</para>
+        /// <para><b>列内位置还原不了，这是宿主限制，别再试</b>：<c>Dock(n)</c> 的语义是"停到那条边、
+        /// 插到该停靠区<b>最前面</b>"；停靠状态下的 <c>Left/Top</c> 是只读的行列索引（写进去读回来还是 0），
+        /// 对已停在同一侧的工具栏再 <c>Dock</c> 一次还会直接报"已固定到同一边"。
+        /// 想靠 CUI 分部菜单让 AutoCAD 自己记 <c>dockrow</c> 的做法已经试过并回退 —— 它会让宿主每次启动
+        /// 都去解析那个 cuix，直接把 CAD 卡成假死（见 <see cref="CleanupLegacyCui"/>）。
+        /// 所以这里只还原"停在哪条边"，用户在列里的具体位置由宿主决定（新建的工具栏总在该列最上面）。</para>
         /// <returns>摆成功返回 <c>true</c>；失败时下次 <c>Ensure</c>（Idle 重试）还会再试一次。</returns></summary>
         private static bool ApplySavedPlacement(object toolbar)
         {
@@ -539,7 +577,8 @@ namespace XAnnotation
 
             if (TryDock(toolbar, saved.Dock))
             {
-                TryRestoreOffset(toolbar, saved);
+                // 只还原方向。列内位置（Top/Left 偏移）宿主不开放，写进去也不认 ——
+                // 见方法注释里的实测结论，不要在这里加"再写一次坐标"的做法。
                 PluginLog.Info("Toolbar.Placement", "按上次摆放恢复：" + saved.Describe() + "。");
                 return true;
             }
@@ -547,35 +586,6 @@ namespace XAnnotation
             // 记录里的方向在这个宿主上摆不动：退回默认，别留在半空。
             PluginLog.Warning("Toolbar.Placement", "按记录摆放失败，回到默认底部横排。");
             return TryDock(toolbar, DefaultDock);
-        }
-
-        /// <summary>停靠之后，再把"停靠区里的偏移"摆一次。
-        /// <para><b>为什么需要这一步</b>：AutoCAD 对运行时建的工具栏是"重新插入"，<c>Dock(n)</c> 一律插到
-        /// 该停靠区的<b>最前面（顶部）</b> —— 用户把工具条拖到左列中部，重启后就跑到最上面
-        /// （用户 2026-11-10 反馈的现场：同一条左列，位置从 y≈575 变成 y≈50）。
-        /// ActiveX 没有"停靠顺序 / 列内偏移"的接口，唯一可能有效的就是直接写 <c>Left/Top</c>：
-        /// 这里写一次并把<b>读回值</b>记进日志 —— 宿主认就用上，不认也顶多还是顶部，不会更糟。</para>
-        /// <para>只写与停靠方向一致的那一个分量（左/右列看 <c>Top</c>，上/下排看 <c>Left</c>），
-        /// 免得两个一起写把工具条挪出停靠区。</para></summary>
-        private static void TryRestoreOffset(object toolbar, ToolbarPlacement saved)
-        {
-            if (toolbar == null || saved == null) return;
-            var vertical = saved.Dock == DockLeft || saved.Dock == DockRight;
-            var name = vertical ? "Top" : "Left";
-            var value = vertical ? saved.Top : saved.Left;
-            if (value == int.MinValue) return;
-
-            try
-            {
-                toolbar.GetType().InvokeMember(name, BindingFlags.SetProperty, null, toolbar, new object[] { value });
-                TryReadInt(toolbar, name, out var applied);
-                PluginLog.Info("Toolbar.Placement",
-                    name + " 偏移还原：写入 " + value + "，读回 " + applied + "（读回不同＝宿主不认列内偏移）。");
-            }
-            catch (Exception ex)
-            {
-                PluginLog.Warning("Toolbar.Placement.Offset", name + " 写入失败：" + Describe(ex));
-            }
         }
 
         /// <summary>把工具栏停靠到指定方向；失败返回 <c>false</c>（不冒泡）。
@@ -656,10 +666,8 @@ namespace XAnnotation
                 _placementWatchFailures = 0;
 
                 var placement = new ToolbarPlacement { Dock = dock, Rows = 1 };
-                // 停靠时也把 Left/Top 读下来：AutoCAD 对停靠中的工具条一般只回 0，但万一是
-                // "列内偏移"就能拿来还原（见 TryRestoreOffset）；读不到就保持"未知"。
-                if (TryReadInt(toolbar, "Left", out var left)) placement.Left = left;
-                if (TryReadInt(toolbar, "Top", out var top)) placement.Top = top;
+                // 只记停靠方向。Left/Top 在停靠状态下是只读的行列索引（永远是 0），
+                // 记下来也还原不了，就别每 1.2 秒多读两个 COM 属性了。
                 if (dock == DockFloating && TryReadInt(toolbar, "FloatingRows", out var rows) && rows > 0)
                     placement.Rows = rows;
 
