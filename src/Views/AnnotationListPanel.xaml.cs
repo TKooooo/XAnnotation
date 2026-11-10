@@ -64,6 +64,10 @@ namespace XAnnotation.Views
         /// <summary>Esc 已经收到、正在（排队）还原窗口；防止连按 Esc 重复排队。</summary>
         private bool _escReturnPending;
 
+        /// <summary>为了不挡住 CAD / 文件对话框而临时摘掉了置顶，等用户点回列表时再置顶。
+        /// （发命令、定位、弹保存框三种场合都会摘，见 <see cref="ReleaseTopmost"/>。）</summary>
+        private bool _topmostSuspended;
+
         private AnnotationListPanel()
         {
             WpfGuard.Install();
@@ -72,6 +76,8 @@ namespace XAnnotation.Views
             CadDialog.RegisterFloating(this);
 
             Loaded += OnPanelLoaded;
+            // 摘掉置顶之后只在"用户重新点回列表"这一刻恢复，见 ReleaseTopmost 的说明。
+            Activated += (s, e) => SafeRun("Activated", RestoreTopmostNow);
             SizeChanged += (_, __) => SafeRun("Resize", ResizeSummaryColumn);
             PreviewKeyDown += (s, e) => SafeRun("KeyDown", () => OnPreviewKeyDown(s, e));
             Closing += (_, __) =>
@@ -488,6 +494,7 @@ namespace XAnnotation.Views
             try
             {
                 Topmost = false;
+                _topmostSuspended = true;
                 if (WindowState != WindowState.Minimized)
                 {
                     WindowState = WindowState.Minimized;
@@ -520,6 +527,7 @@ namespace XAnnotation.Views
                 if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
                 if (!IsVisible) Show();
                 Topmost = true;
+                _topmostSuspended = false;
                 Activate();
                 _minimizedForCad = false;
             }
@@ -619,23 +627,41 @@ namespace XAnnotation.Views
 
         /// <summary>
         /// 把命令交给 CAD 执行（不阻塞本窗口）。
-        /// <para>发命令前先摘掉置顶：CAD 的"另存为/打开"这类原生对话框不认我们的 Owner，
-        /// 本窗口置顶时会把它们压在后面（用户会以为按钮没反应）。1.2 秒后自动恢复置顶。</para>
+        /// <para><b>发命令后必须让位</b>：命令执行期间可能弹"另存为/打开"对话框，也可能长时间占着界面
+        /// （Word 导出要逐条缩放截图）。以前的做法是"发命令时摘掉置顶、1.2 秒后自动恢复"——
+        /// 恢复的那一刻对话框往往正开着，列表又跳回最前把它压住，现场就是
+        /// <b>"导出 Word 回复单时，批注列表挡住保存文件的界面"</b>。</para>
+        /// <para>现在改成：摘掉置顶后<b>不再自动抢回</b>，等用户重新点回列表
+        /// （<see cref="RestoreTopmostNow"/>，挂在 Activated 上）时再置顶。</para>
         /// </summary>
         private void RunCommand(string command)
         {
-            var wasTopmost = Topmost;
-            Topmost = false;
-            if (!RunCommandDirect(command)) { if (wasTopmost) Topmost = true; return; }
+            ReleaseTopmost();
+            if (!RunCommandDirect(command)) RestoreTopmostNow();
+        }
 
-            if (!wasTopmost) return;
-            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
-            timer.Tick += (s, args) =>
+        /// <summary>临时摘掉置顶；不自动恢复（用户点回窗口时才置顶），也不动最小化状态。</summary>
+        private void ReleaseTopmost()
+        {
+            try
             {
-                timer.Stop();
-                try { if (IsLoaded && WindowState != WindowState.Minimized) Topmost = true; } catch { }
-            };
-            timer.Start();
+                if (!Topmost && !_topmostSuspended) return;
+                Topmost = false;
+                _topmostSuspended = true;
+            }
+            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.ReleaseTopmost", ex.Message); }
+        }
+
+        /// <summary>把置顶恢复回来（只在之前摘过的时候动，避免抢用户的窗口）。</summary>
+        private void RestoreTopmostNow()
+        {
+            try
+            {
+                if (!_topmostSuspended) return;
+                _topmostSuspended = false;
+                if (IsLoaded && WindowState != WindowState.Minimized) Topmost = true;
+            }
+            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.RestoreTopmostNow", ex.Message); }
         }
 
         /// <summary>直接发命令；发不出去时在界面上说清楚，不再"点了没反应"。</summary>

@@ -191,6 +191,36 @@ namespace XAnnotation
             }
         }
 
+        /// <summary>弹系统文件对话框（另存为 / 打开）期间，把本插件的置顶窗口临时降为普通窗口。
+        /// <para><b>为什么需要</b>：批注列表是 <c>Topmost</c>（要压在 CAD 之上方便对照），
+        /// 而 <c>Microsoft.Win32.SaveFileDialog</c> 不是我们的子窗口 —— 两个顶层窗口互相不能压住对方时，
+        /// 后出的那个反而被先置顶的挡在后面。现场表现就是"导出 Word 回复单时，批注列表挡住保存文件界面"。</para>
+        /// <para><b>用法</b>：<c>using (CadDialog.SuspendTopmost()) { dialog.ShowDialog(); }</c>，
+        /// 对话框关掉后自动恢复置顶。</para></summary>
+        public static IDisposable SuspendTopmost()
+        {
+            List<Window> lowered = null;
+            try { lowered = LowerTopmostWindows(null); }
+            catch (Exception ex) { PluginLog.Warning("WPF.SuspendTopmost", ex.Message); }
+            return new TopmostLease(lowered);
+        }
+
+        /// <summary><see cref="SuspendTopmost"/> 的租约：Dispose 时把降级过的窗口恢复置顶。</summary>
+        private sealed class TopmostLease : IDisposable
+        {
+            private List<Window> _lowered;
+
+            internal TopmostLease(List<Window> lowered) { _lowered = lowered; }
+
+            public void Dispose()
+            {
+                var lowered = _lowered;
+                _lowered = null;
+                try { RestoreTopmost(lowered); }
+                catch (Exception ex) { PluginLog.Warning("WPF.TopmostLease", ex.Message); }
+            }
+        }
+
         /// <summary>打开批注窗口，并处理"拾取图面文字"请求。
         /// 批注窗口是 CAD 模态窗口，显示期间无法与图形交互，所以"拾取文字"的流程是：
         /// 窗口把已填内容存回数据对象后关闭 → 在图上点选文字 → 重开窗口（已填内容原样带回）。</summary>

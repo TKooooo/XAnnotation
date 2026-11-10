@@ -393,7 +393,10 @@ namespace XAnnotation
                     Filter = "CSV 文件 (*.csv)|*.csv",
                     FileName = "批注信息_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv"
                 };
-                if (dialog.ShowDialog() != true) return;
+                // 保存对话框期间让置顶的批注列表先让位，别把它压在下面。
+                bool picked;
+                using (CadDialog.SuspendTopmost()) picked = dialog.ShowDialog() == true;
+                if (!picked) return;
                 var report = AnnotationExchange.Export(doc, dialog.FileName, only);
                 doc.Editor.WriteMessage("\n" + report);
             }
@@ -412,7 +415,9 @@ namespace XAnnotation
                     Title = "导入批注",
                     Filter = "CSV 文件 (*.csv)|*.csv|所有文件 (*.*)|*.*"
                 };
-                if (dialog.ShowDialog() != true) return;
+                bool picked;
+                using (CadDialog.SuspendTopmost()) picked = dialog.ShowDialog() == true;
+                if (!picked) return;
                 doc.Editor.WriteMessage("\n正在导入批注...");
                 var report = AnnotationExchange.Import(doc, dialog.FileName);
                 doc.Editor.WriteMessage("\n" + report);

@@ -58,7 +58,11 @@ namespace XAnnotation
                 AddExtension = true,
                 DefaultExt = ".docx"
             };
-            if (dialog.ShowDialog() != true) return;
+            // 保存对话框弹出期间先让本插件的置顶窗口（批注列表）挪到后面：
+            // 两个 Topmost 窗口互相压不住，列表会把"另存为"挡在下面（现场反馈的问题）。
+            bool picked;
+            using (CadDialog.SuspendTopmost()) picked = dialog.ShowDialog() == true;
+            if (!picked) return;
 
             // 截图前记住当前视图，导出完成后恢复。
             ViewTableRecord originalView = null;
