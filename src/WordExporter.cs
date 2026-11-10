@@ -163,12 +163,14 @@ namespace XAnnotation
                     if (bitmap == null) return null;
                     // 纯色判断用原始截图做（转换后背景一定是白的，会把"没渲染出来"掩盖掉）。
                     var nearlyUniform = LooksNearlyUniform(bitmap);
+                    // 先缩到 1600 再换底色：像素转换只在最终尺寸上做一遍，省一半时间；
+                    // 顺序反过来（先转换再缩放）观感几乎一样，都是细线被重采样成浅灰。
                     // shotStyle：0=白底黑字、1=白底彩色、2=保持原样
-                    using (var styled = shotStyle == 2 ? new Bitmap(bitmap) : ToInkOnWhite(bitmap, shotStyle == 1))
-                    using (var scaled = Downscale(styled, 1600))
+                    using (var scaled = Downscale(bitmap, 1600))
+                    using (var styled = shotStyle == 2 ? new Bitmap(scaled) : ToInkOnWhite(scaled, shotStyle == 1))
                     using (var stream = new MemoryStream())
                     {
-                        scaled.Save(stream, ImageFormat.Png);
+                        styled.Save(stream, ImageFormat.Png);
                         lastCapture = stream.ToArray();
                     }
                     if (!nearlyUniform) return lastCapture;
