@@ -29,10 +29,11 @@ namespace XAnnotation
         };
 
         /// <summary>导出 Word 回复单时的截图底色。<b>顺序就是设置值</b>（0/1/2），
-        /// 见 <see cref="AnnotationSettings.ExportShotStyle"/> 与 WordExporter.ToInkOnWhite。</summary>
+        /// 见 <see cref="AnnotationSettings.ExportShotStyle"/> 与 WordExporter.ToInkOnWhite。
+        /// <para>文字要短：设置窗口的值列固定 120，长标签会被截成省略号（详细说明写在下方的提示行里）。</para></summary>
         public static readonly string[] ExportShotStyles =
         {
-            "白底黑字（打印稿）", "白底彩色（保留状态色）", "保持原样（CAD 黑底）"
+            "白底黑字", "白底彩色", "保持原样"
         };
     }
 }

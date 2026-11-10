@@ -186,7 +186,7 @@
                             <ComboBox x:Name="ExportShotStyleCombo" Grid.Column="1"/>
                         </Grid>
                         <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0"
-                                   Text="只改导出的图片像素：不动图形、也不改 CAD 的显示设置，导出中途出错不会把界面留成白底。图为白色底（布局）时自动不做转换。"/>
+                                   Text="白底黑字＝黑白打印稿效果（默认）；白底彩色＝背景转白、线字保留原色相但压深；保持原样＝CAD 黑底截图。只改导出图片的像素：不动图形、也不改 CAD 的显示设置，导出中途出错不会把界面留成白底；图为白色底（布局）时自动不做转换。"/>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
