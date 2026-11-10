@@ -23,12 +23,6 @@ namespace XAnnotation
         /// 修改=3 右侧、X-批注=1 底部）。<b>-1 表示没有记录</b>。</para></summary>
         public int Dock { get; set; } = -1;
 
-        /// <summary>浮动时的屏幕左上角（像素，AutoCAD 主窗口客户区坐标）；停靠时无意义。</summary>
-        public int Left { get; set; } = int.MinValue;
-
-        /// <summary>见 <see cref="Left"/>。</summary>
-        public int Top { get; set; } = int.MinValue;
-
         /// <summary>浮动时排成几行（默认 1 行横排）；停靠时无意义。</summary>
         public int Rows { get; set; } = 1;
 
@@ -50,8 +44,6 @@ namespace XAnnotation
                 var placement = new ToolbarPlacement
                 {
                     Dock = ParseInt(Attribute(root, "Dock"), -1),
-                    Left = ParseInt(Attribute(root, "Left"), int.MinValue),
-                    Top = ParseInt(Attribute(root, "Top"), int.MinValue),
                     Rows = ParseInt(Attribute(root, "Rows"), 1)
                 };
                 if (placement.Rows <= 0) placement.Rows = 1;
@@ -72,8 +64,6 @@ namespace XAnnotation
                 var document = new XDocument(
                     new XElement("XAnnotationToolbar",
                         new XAttribute("Dock", placement.Dock),
-                        new XAttribute("Left", placement.Left),
-                        new XAttribute("Top", placement.Top),
                         new XAttribute("Rows", placement.Rows)));
                 // 先写临时文件再替换：CAD 被强制结束时不会留下半截 XML（下次启动会当成"没记录"）。
                 var path = FilePath();
@@ -101,11 +91,6 @@ namespace XAnnotation
         {
             var names = new[] { "顶部横排", "底部横排", "左侧竖排", "右侧竖排", "浮动" };
             var name = Dock >= 0 && Dock < names.Length ? names[Dock] : "未记录";
-            if (Left != int.MinValue || Top != int.MinValue)
-            {
-                name += "(x=" + (Left == int.MinValue ? "?" : Left.ToString(CultureInfo.InvariantCulture))
-                     + ",y=" + (Top == int.MinValue ? "?" : Top.ToString(CultureInfo.InvariantCulture)) + ")";
-            }
             if (Dock == 4) name += "/" + Rows + " 行";
             return name;
         }

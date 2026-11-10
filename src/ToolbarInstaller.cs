@@ -108,11 +108,16 @@ namespace XAnnotation
 
         private static bool _placementWatchAttached;
         private static DateTime _lastPlacementWatchUtc = DateTime.MinValue;
+        private static DateTime _placementWatchStartedUtc = DateTime.MinValue;
         private static int _placementWatchFailures;
 
         /// <summary>摆放轮询间隔（毫秒）。工具栏是 COM 对象、没有"被拖动"事件，只能轻量轮询。
         /// 1.2 秒：用户拖完到关 CAD 之间基本都能抓到；又比 3 秒短得多，不至于"刚拖完就重启"丢位置。</summary>
         private const int PlacementWatchIntervalMs = 1200;
+
+        /// <summary>观察窗口（毫秒）：过了就不再轮询。用户开局摆一次工具条就够了，
+        /// 没必要让插件每 1.2 秒去读一次 COM 属性、一直读到 CAD 关闭。</summary>
+        private const int PlacementWatchWindowMs = 15 * 60 * 1000;
 
         /// <summary>连续读不到 <c>DockStatus</c> 这么多次就停掉轮询（个别宿主 / 版本不公开该属性）。</summary>
         private const int PlacementWatchMaxFailures = 10;
@@ -310,31 +315,31 @@ namespace XAnnotation
         /// <c>&lt;PartialMenuFile&gt;</c>，于是<b>每次启动 AutoCAD 都要先解析这个文件</b>，
         /// 现场表现就是"CAD 启动卡很久 / 假死"（2026-11-10 16:30、16:31 两次 Application Hang）。
         /// 现在工具栏改回 COM 建法，这份登记必须撤掉，否则用户即使升级插件也还是每次都卡。</para>
-        /// <para>撤登记交给宿主自己的 <c>MenuGroups.Unload</c>：它会把 <c>&lt;PartialMenuFile&gt;</c>
-        /// 和四个工作空间里的 <c>&lt;WSToolbar pUID="TB_XANNOT"&gt;</c> 一起删干净（实测），
-        /// 比自己改 acad.cuix 安全得多。再顺手删掉 Support 下的 cuix / mr 残留文件。
+        /// <para>撤登记交给宿主自己的 <c>AcadMenuGroup.Unload()</c>（注意：**不是** <c>MenuGroups.Unload</c>，
+        /// 后者在 IDispatch 里不存在）：它会把 <c>&lt;PartialMenuFile&gt;</c> 和四个工作空间里的
+        /// <c>&lt;WSToolbar pUID="TB_XANNOT"&gt;</c> 一起删干净，比自己改 acad.cuix 安全得多
+        /// （**绝对不要**在 CAD 运行期间去改它的 acad.cuix —— 实测会把进程直接搞崩）。再顺手删掉 Support 下的 cuix / mr 残留文件。
         /// 全程 best-effort：任何一步失败只记日志，绝不影响工具栏本身。</para></summary>
         private static void CleanupLegacyCui()
         {
             if (_legacyCuiCleaned) return;
             _legacyCuiCleaned = true;
 
-            // ① 从主 CUI 注销分部菜单（没登记过时 Unload 会抛，属正常情况，不记日志）。
-            try
+            // ① 从主 CUI 注销分部菜单。**必须用 MenuGroup 对象的 Unload()**：
+            //    `MenuGroups.Unload(名字)` 在 IDispatch 里根本没有这个方法（实测报
+            //    DISP_E_UNKNOWNNAME「未知名称」），而 MenuInstaller 的 InvokeMethod 会把异常吞成 null，
+            //    于是"看起来成功了、其实什么都没做"—— 曾经因此把 cuix 删了、主 CUI 里的登记还在。
+            var state = UnloadLegacyGroup();
+            if (state > 0)
+                PluginLog.Info("Toolbar.Cui.Cleanup", "已从主 CUI 撤销上一版的分部菜单「" + LegacyCuiMenuGroup + "」。");
+            if (state < 0)
             {
-                var menuGroups = GetMenuGroupsStatic();
-                if (menuGroups != null)
-                {
-                    try
-                    {
-                        menuGroups.InvokeMethod("Unload", LegacyCuiMenuGroup);
-                        PluginLog.Info("Toolbar.Cui.Cleanup",
-                            "已从主 CUI 注销上一版的分部菜单「" + LegacyCuiMenuGroup + "」。");
-                    }
-                    catch { /* 本来就没加载：最常见的情况，静默跳过 */ }
-                }
+                // 还挂在主 CUI 上：这时**不能**删 cuix 文件，否则下次启动会指向一个不存在的包。
+                PluginLog.Warning("Toolbar.Cui.Cleanup",
+                    "旧的分部菜单「" + LegacyCuiMenuGroup + "」撤销失败，先保留 cuix 文件；" +
+                    "如仍觉得启动慢，可在命令行输入 CUI 手动删掉「X-批注」工具栏。");
+                return;
             }
-            catch (Exception ex) { PluginLog.Warning("Toolbar.Cui.Cleanup", Describe(ex)); }
 
             // ② 删掉 Support 目录里的 cuix / 编译产物残留（留着没有意义，还容易被 CAD 误当成可用菜单）。
             try
@@ -362,6 +367,55 @@ namespace XAnnotation
                     PluginLog.Info("Toolbar.Cui.Cleanup", "已删除 " + removed + " 个 CUI 残留文件（" + support + "）。");
             }
             catch (Exception ex) { PluginLog.Warning("Toolbar.Cui.Cleanup.File", Describe(ex)); }
+        }
+
+        /// <summary>把上一版加载进来的分部菜单组从主 CUI 上摘掉。
+        /// <para><b>返回</b>：<c>1</c> = 撤销成功（复核已找不到）；<c>0</c> = 本来就没加载（最常见）；
+        /// <c>-1</c> = 还在（撤销失败，调用方必须保留文件）。</para>
+        /// <para>全部用裸反射而不是 <c>InvokeMethod</c> 扩展：那个扩展把异常吞成 <c>null</c>，
+        /// 会让"没成功"看起来像"成功了"。</para></summary>
+        private static int UnloadLegacyGroup()
+        {
+            object menuGroups;
+            try { menuGroups = GetMenuGroupsStatic(); }
+            catch { return 0; }
+            if (menuGroups == null) return 0;
+
+            var group = FindMenuGroup(menuGroups);
+            if (group == null) return 0;
+
+            try
+            {
+                group.GetType().InvokeMember("Unload", BindingFlags.InvokeMethod, null, group, new object[0]);
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning("Toolbar.Cui.Cleanup.Unload", Describe(ex));
+                return -1;
+            }
+
+            // 复核：Item 再取一次，还取得到说明没真撤掉。
+            return FindMenuGroup(menuGroups) == null ? 1 : -1;
+        }
+
+        /// <summary>按名取菜单组；没有就返回 <c>null</c>（Item 既可能暴露成方法也可能暴露成属性索引）。</summary>
+        private static object FindMenuGroup(object menuGroups)
+        {
+            if (menuGroups == null) return null;
+            var arguments = new object[] { LegacyCuiMenuGroup };
+            try
+            {
+                return menuGroups.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, menuGroups, arguments);
+            }
+            catch
+            {
+                try
+                {
+                    return menuGroups.GetType().InvokeMember("Item",
+                        BindingFlags.GetProperty, null, menuGroups, new object[] { LegacyCuiMenuGroup });
+                }
+                catch { return null; }
+            }
         }
 
         /// <summary>CAD 的 Support 目录：从「主菜单文件」（Preferences → 文件 → 主自定义文件）反推，
@@ -612,6 +666,7 @@ namespace XAnnotation
             try
             {
                 _lastPlacementWatchUtc = DateTime.MinValue;
+                _placementWatchStartedUtc = DateTime.UtcNow;
                 _placementWatchFailures = 0;
                 CadApplication.Idle += OnPlacementWatchIdle;
                 _placementWatchAttached = true;
@@ -639,6 +694,17 @@ namespace XAnnotation
             var now = DateTime.UtcNow;
             if ((now - _lastPlacementWatchUtc).TotalMilliseconds < PlacementWatchIntervalMs) return;
             _lastPlacementWatchUtc = now;
+
+            // 观察窗口有限：用户开局摆一次工具条就够了，没必要让插件每 1.2 秒读一次 COM 属性、
+            // 一直读到 CAD 关闭 —— 这类"永久轮询"是自找麻烦（Idle 里出任何岔子都是进程级事故）。
+            if ((now - _placementWatchStartedUtc).TotalMilliseconds > PlacementWatchWindowMs)
+            {
+                DetachPlacementWatch();
+                PluginLog.Info("Toolbar.Placement.Watch",
+                    "已停止记住工具栏摆放（观察窗口 " + (PlacementWatchWindowMs / 60000) + " 分钟到）。");
+                return;
+            }
+
             CapturePlacement(false);
         }
 
