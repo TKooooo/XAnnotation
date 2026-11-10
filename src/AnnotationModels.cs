@@ -106,6 +106,12 @@ namespace XAnnotation
         public bool PanelMultiMode { get; set; } = false;
         /// <summary>面板上次是否勾选「仅绘云线」。</summary>
         public bool PanelCloudOnly { get; set; } = false;
+        /// <summary>功能选择框（快捷菜单）上次停在屏幕上的位置：窗口左上角，屏幕 DIP（与 WPF <c>Left</c>/<c>Top</c> 同口径）。
+        /// <para><b>NaN = 还没记录过</b>（首次打开按"工作区左上角 +20"摆）。用户在图纸右下角放好之后，
+        /// 每次关面板都写一次，下次打开原地出现——这是"快捷菜单每次跑到左边竖排"的修法。</para></summary>
+        public double PanelLeft { get; set; } = double.NaN;
+        /// <summary>见 <see cref="PanelLeft"/>。</summary>
+        public double PanelTop { get; set; } = double.NaN;
         public bool SameColors { get; set; } = true;
         public bool LayerAppendDate { get; set; } = true;
         public bool LayerAppendName { get; set; } = false;

@@ -378,6 +378,7 @@ namespace XAnnotation
                 var group=new Group("X-批注 "+data.Number,true);
                 groups.SetAt(GroupPrefix+data.Id,group);tr.AddNewlyCreatedDBObject(group,true);group.Append(ids);
                 WriteMaster(group,tr,data);
+                LogCreatedAnnotation(doc, tr, group, settings, "CreateMultiCloud");
                 tr.Commit();
                 ArchiveRecord(doc, "创建", data, null);
             }
@@ -1075,6 +1076,7 @@ namespace XAnnotation
                 var group = new Group("X-批注 " + data.Number, true);
                 groups.SetAt(GroupPrefix + data.Id, group); tr.AddNewlyCreatedDBObject(group, true); group.Append(ids);
                 WriteMaster(group, tr, data);
+                LogCreatedAnnotation(doc, tr, group, settings, "Create");
                 tr.Commit();
                 ArchiveRecord(doc, "创建", data, null);
                 return true;
@@ -3619,6 +3621,91 @@ namespace XAnnotation
         /// <summary>给定 4 个 WCS 角点，找离目标最近的角。</summary>
         internal static Point2d ClosestCorner4(Point2d[] corners,Point3d p){var target=new Point2d(p.X,p.Y);return corners.OrderBy(c=>c.GetDistanceTo(target)).First();}
         private static bool Contains(Group group,ObjectId id){foreach(ObjectId member in group.GetAllEntityIds())if(member==id)return true;return false;}
+
+        /// <summary>PICKSTYLE=0 的提示只发一次，别每次落图都在命令行刷一遍。</summary>
+        private static bool _pickStyleZeroReported;
+
+        /// <summary>把"这条批注落图后的实际情况"写进运行日志（只写日志，不动图）。
+        /// <para><b>为什么需要</b>：现场反馈的两类问题——"点云线只选中文字框、不整体选中"和"云线看着零碎"——
+        /// 只能看实物判断。这里一次性记下 <c>PICKSTYLE</c>、编组是否可选择、成员数、云线的图层/线型/线宽/
+        /// 顶点数与首段弦长，出问题时直接看日志就能定位，不必让用户反复截图。</para></summary>
+        private static void LogCreatedAnnotation(Document doc, Transaction tr, Group group, AnnotationSettings settings, string stage)
+        {
+            try
+            {
+                var count = 0;
+                var cloudVertices = 0;
+                var cloudChord = 0.0;
+                var cloudWidth = 0.0;
+                var cloudLayer = "(无云线)";
+                var cloudLinetype = "?";
+                foreach (ObjectId oid in group.GetAllEntityIds())
+                {
+                    count++;
+                    Entity entity;
+                    try { entity = tr.GetObject(oid, OpenMode.ForRead, false) as Entity; }
+                    catch { continue; }
+                    var poly = entity as Polyline;
+                    // 云线是编组里顶点最多的那条多段线（引线只有 2 个顶点，文字框是闭合 4 段）。
+                    if (poly == null || poly.NumberOfVertices <= cloudVertices) continue;
+                    cloudVertices = poly.NumberOfVertices;
+                    cloudLayer = poly.Layer;
+                    cloudWidth = SafeConstantWidth(poly);
+                    try
+                    {
+                        if (cloudVertices > 1)
+                            cloudChord = poly.GetPoint2dAt(0).GetDistanceTo(poly.GetPoint2dAt(1));
+                    }
+                    catch { }
+                    try
+                    {
+                        if (tr.GetObject(poly.LinetypeId, OpenMode.ForRead) is LinetypeTableRecord lt) cloudLinetype = lt.Name;
+                    }
+                    catch { }
+                }
+
+                var pickStyle = "?";
+                try { pickStyle = Convert.ToInt32(CadSystemVariable("PICKSTYLE")).ToString(); }
+                catch { }
+
+                // PICKSTYLE=0 时 CAD 不允许按编组整体点选：点云线只会选中云线本身，点文字框只选文字框。
+                // 这是用户自己图里的全局设置，插件不去改，只提示一次（否则会被当成"批注不成组"的 bug）。
+                if (pickStyle == "0" && !_pickStyleZeroReported)
+                {
+                    _pickStyleZeroReported = true;
+                    try
+                    {
+                        doc.Editor.WriteMessage(
+                            "\n提示：当前 PICKSTYLE=0，编组无法整体点选（点云线只会选中云线本身）。" +
+                            "在命令行输入 PICKSTYLE 设为 1 后，点任一元素即可选中整条批注。");
+                    }
+                    catch { }
+                }
+
+                PluginLog.Info("Annotation.Diag",
+                    stage + " 编组「" + group.Name + "」成员=" + count + " 可选择=" + GroupSelectable(group) +
+                    "；PICKSTYLE=" + pickStyle +
+                    "；云线 图层=" + cloudLayer + " 线型=" + cloudLinetype + " 线宽=" + cloudWidth.ToString("0.###") +
+                    " 顶点=" + cloudVertices + " 首段弦长=" + cloudChord.ToString("0.###") +
+                    "；设置 半径=" + settings.CloudRadius.ToString("0.###") + " 云线线宽=" + settings.LineWidth.ToString("0.###") +
+                    " 样式=" + settings.CloudStyle + " 比例选型=1:" + settings.ScaleRatio.ToString("0.###") +
+                    " 识别 1mm=" + DrawingScale.UnitsPerMillimeter(doc).ToString("0.###") + " 图形单位");
+            }
+            catch (System.Exception ex) { PluginLog.Warning("Annotation.Diag", ex.Message); }
+        }
+
+        /// <summary>编组的"可选择"标志：老图里可能存在不可选择的编组，
+        /// 那种编组点任何一个成员都只会选中该成员本身（现场表现就是"云线不成组"）。</summary>
+        private static string GroupSelectable(Group group)
+        {
+            try
+            {
+                var property = group.GetType().GetProperty("Selectable");
+                var value = property?.GetValue(group, null);
+                return value == null ? "?" : value.ToString();
+            }
+            catch { return "?"; }
+        }
         // 渐变云线：线宽走逐段顶点宽度（BuildScallopedVertices 已写入），ConstantWidth 必须保持 0，否则 0 宽度端回退用 ConstantWidth 会抹平渐变。
         private static void Add(BlockTableRecord space,Transaction tr,Entity e,ObjectIdCollection ids,AnnotationSettings s,string id,string role,short color,AnnotationData data=null,string layerOverride=null){e.Layer=string.IsNullOrEmpty(layerOverride)?EffectiveLayer(s,data):layerOverride;e.Color=Color.FromColorIndex(ColorMethod.ByAci,color);if(e is Polyline p&&s.LineWidth>0&&(role=="cloud"||role=="leader")){if(role=="leader"||s.CloudStyle!="渐变")p.ConstantWidth=s.LineWidth;}var rb=new ResultBuffer(new TypedValue((int)DxfCode.ExtendedDataRegAppName,AnnotationCodec.AppName),new TypedValue((int)DxfCode.ExtendedDataAsciiString,id),new TypedValue((int)DxfCode.ExtendedDataAsciiString,role));if(data!=null)foreach(var chunk in AnnotationCodec.BuildChunks(data))rb.Add(new TypedValue((int)DxfCode.ExtendedDataAsciiString,chunk));e.XData=rb;ids.Add(space.AppendEntity(e));tr.AddNewlyCreatedDBObject(e,true);}
         private static bool TryGetRole(Entity e,out string role){role=null;var rb=e.GetXDataForApplication(AnnotationCodec.AppName);if(rb==null)return false;var a=rb.AsArray();if(a.Length<3)return false;role=a[2].Value as string;return role!=null;}

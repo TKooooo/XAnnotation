@@ -337,6 +337,9 @@ namespace XAnnotation
         {
             var doc = CadApplication.DocumentManager.MdiActiveDocument;
             if (doc == null) { PluginEntry.RestoreQuickPropertiesMode(); return; }
+            // 双击路径一进入命令就把 DBLCLKEDIT 还回去（不能等 finally：编辑窗一开就是几十秒，
+            // 这期间 DBLCLKEDIT=0 会让用户对别的对象双击也没反应）。
+            PluginEntry.RestoreDoubleClickEdit();
             try
             {
                 var implied = doc.Editor.SelectImplied();

@@ -75,6 +75,16 @@ namespace XAnnotation
         /// <summary>双击编辑期间临时保存 CAD 的快捷特性模式，避免与插件编辑窗口同时弹出。</summary>
         private static object _savedQuickPropertiesMode;
         private static bool _quickPropertiesSuppressed;
+        /// <summary>双击编辑期间临时保存的 DBLCLKEDIT 原值（null = 没动过）。
+        /// <para>改它是为了让 CAD 不产生原生双击命令，从根上免掉"Veto 之后命令行挂着待取消命令"。</para></summary>
+        private static object _savedDoubleClickEdit;
+        private static bool _doubleClickEditSuppressed;
+
+        /// <summary>临时关掉 DBLCLKEDIT 之后的兜底启动延迟（秒）。
+        /// <para>关掉之后正常情况下<b>不会</b>再有原生命令，但个别宿主可能不认"在事件里改系统变量"，
+        /// 那时原生命令会在几毫秒内冒出来并被 Veto（立刻启动编辑，不用等这个时间）。这里取 0.25 秒，
+        /// 既是"双击后马上出编辑框"，又给迟到的原生命令留出被拦下的窗口。</para></summary>
+        private const double SuppressedFallbackSeconds = 0.25;
 
         /// <summary>依赖兜底解析：已在自己目录里找过的程序集名（防同名重入死循环）。</summary>
         private static readonly HashSet<string> ResolvingAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -407,6 +417,14 @@ namespace XAnnotation
                     LaunchPendingEdit("DBLCLKEDIT=0，无原生动作");
                     return;
                 }
+
+                // ★ 关键：自己把 DBLCLKEDIT 临时关掉，让 CAD **根本不产生**原生命令。
+                //   以前只靠 DocumentLockModeChanged 里 Veto 把原生命令拦下来，代价是那次取锁被否掉之后，
+                //   CAD 会把这条命令留在"正在执行"状态，命令行挂着"按回车取消或[重试]" ——
+                //   用户必须先按一次 Esc 或回车，插件排队的 X_PZ_EDIT 才轮得到执行（现场就是"双击要按 Esc"）。
+                //   关掉 DBLCLKEDIT 之后没有原生命令可拦，也就不存在这条挂起的提示；Veto 只留作兜底
+                //   （个别宿主在事件里改系统变量不生效时才会走到）。
+                SuppressDoubleClickEdit();
 
                 // 其余情况挂 Idle 兜底：若 CAD 没有为该对象类型配置双击动作，就不会有任何命令可拦，
                 // 到点后由 OnIdle 直接启动编辑。
@@ -748,7 +766,9 @@ namespace XAnnotation
             if (_doubleClickArmed)
             {
                 var elapsed = (DateTime.UtcNow - _doubleClickArmedUtc).TotalSeconds;
-                if (elapsed > FallbackDelaySeconds) LaunchPendingEdit("未收到原生双击命令");
+                // 已经把 DBLCLKEDIT 关掉时不可能再有原生命令：用更短的兜底，双击手感不变慢。
+                var deadline = _doubleClickEditSuppressed ? SuppressedFallbackSeconds : FallbackDelaySeconds;
+                if (elapsed > deadline) LaunchPendingEdit("未收到原生双击命令");
                 else idleStillNeeded = true;
             }
 
@@ -807,6 +827,42 @@ namespace XAnnotation
             catch (System.Exception ex) { PluginLog.Error("SysVar." + name, ex); return fallback; }
         }
 
+        /// <summary>双击期间把 DBLCLKEDIT 临时改成 0：CAD 判定"双击不做任何原生动作"，
+        /// 于是不会产生 MTEDIT / QUICKPROPERTIES 这类原生命令。
+        /// <para><b>为什么这能治"双击要按 Esc"</b>：原来的办法是在 <c>DocumentLockModeChanged</c> 里
+        /// <c>Veto()</c> 掉原生命令。取锁被否掉之后，CAD 仍把那条命令留在"正在执行"状态，命令行挂着
+        /// "文档正在执行命令，按回车取消或[重试]"；插件随即排队的 <c>X_PZ_EDIT</c> 只能排队等它结束 ——
+        /// 用户看到的就是"双击没弹出编辑框，按一下 Esc 才出来"。没有原生命令，就没有这条挂起提示。</para>
+        /// <para>原值在 <see cref="RestoreQuickPropertiesMode"/> 里还原（编辑命令结束、取消、卸载等所有出口都会走）。</para></summary>
+        private static void SuppressDoubleClickEdit()
+        {
+            if (_doubleClickEditSuppressed) return;
+            try
+            {
+                var value = CadApplication.GetSystemVariable("DBLCLKEDIT");
+                if (Convert.ToInt32(value) == 0) return;      // 本来就是 0：不需要改，也没有要还原的
+                _savedDoubleClickEdit = value;
+                CadApplication.SetSystemVariable("DBLCLKEDIT", 0);
+                _doubleClickEditSuppressed = true;
+                PluginLog.Info("DoubleClick.SuppressDBLCLKEDIT", "双击期间临时把 DBLCLKEDIT 置 0（原值 " + value + "）。");
+            }
+            catch (System.Exception ex) { PluginLog.Error("DoubleClick.SuppressDBLCLKEDIT", ex); }
+        }
+
+        /// <summary>还原双击期间临时关掉的 DBLCLKEDIT。失败也不能影响后续流程。
+        /// <para>编辑命令一进来就调用一次（见 <c>X_PZ_EDIT</c>）：<b>早还原</b>才不会因为编辑窗被人为留住、
+        /// 命令异常退出而让用户的"双击编辑"能力长期失效。QPMODE 不能同时还原（预选还在，会弹快捷特性），
+        /// 所以这两件事不绑在一起。</para></summary>
+        internal static void RestoreDoubleClickEdit()
+        {
+            if (!_doubleClickEditSuppressed) return;
+            var value = _savedDoubleClickEdit;
+            _savedDoubleClickEdit = null;
+            _doubleClickEditSuppressed = false;
+            try { CadApplication.SetSystemVariable("DBLCLKEDIT", value ?? 1); }
+            catch (System.Exception ex) { PluginLog.Error("DoubleClick.RestoreDBLCLKEDIT", ex); }
+        }
+
         private static void SuppressQuickPropertiesMode()
         {
             if (_quickPropertiesSuppressed) return;
@@ -821,9 +877,12 @@ namespace XAnnotation
             catch (System.Exception ex) { PluginLog.Error("DoubleClick.SuppressQuickProperties", ex); }
         }
 
-        /// <summary>编辑命令取得实体后恢复用户原有的 QPMODE，不永久改写 CAD 偏好。</summary>
+        /// <summary>编辑命令取得实体后恢复用户原有的 QPMODE，不永久改写 CAD 偏好。
+        /// <para>双击期间临时改过的 <c>DBLCLKEDIT</c> 在这里一并还原：凡是"这一轮双击结束了"的出口
+        /// （命令执行完、用户取消、切图、卸载）都会走到本方法，两个变量始终成对恢复。</para></summary>
         internal static void RestoreQuickPropertiesMode()
         {
+            RestoreDoubleClickEdit();
             if (!_quickPropertiesSuppressed) return;
             var mode = _savedQuickPropertiesMode;
             _savedQuickPropertiesMode = null;

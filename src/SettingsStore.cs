@@ -54,6 +54,9 @@ namespace XAnnotation
                 s.PanelContinuous=ParseBool(Get(x,"PanelContinuous","false"),false);
                 s.PanelMultiMode=ParseBool(Get(x,"PanelMultiMode","false"),false);
                 s.PanelCloudOnly=ParseBool(Get(x,"PanelCloudOnly","false"),false);
+                // 功能选择框（快捷菜单）上次的位置：没记录就是 NaN，面板按默认位置摆。
+                s.PanelLeft=ParseDouble(Get(x,"PanelLeft","NaN"),double.NaN);
+                s.PanelTop=ParseDouble(Get(x,"PanelTop","NaN"),double.NaN);
                 // 按状态给整条批注着色（已回复 / 已完成）。老配置没有这个节点 → 默认开启，
                 // 因为这两个状态色的语义就是"整条批注换个颜色"，默认关掉等于功能不可见。
                 s.StatusColorize=ParseBool(Get(x,"StatusColorize","true"),true);
@@ -92,6 +95,9 @@ namespace XAnnotation
                 // 功能选择框的"上次选择"：Panel* 只被功能选择框读写，快速直绘不受影响。
                 new XElement("PanelShape",string.IsNullOrWhiteSpace(s.PanelShape)?"矩形":s.PanelShape),
                 new XElement("PanelContinuous",s.PanelContinuous),new XElement("PanelMultiMode",s.PanelMultiMode),new XElement("PanelCloudOnly",s.PanelCloudOnly),
+                // 功能选择框上次的位置（屏幕 DIP）。无记录时写 NaN，读回来仍是"没记录"。
+                new XElement("PanelLeft",s.PanelLeft.ToString("R",CultureInfo.InvariantCulture)),
+                new XElement("PanelTop",s.PanelTop.ToString("R",CultureInfo.InvariantCulture)),
                 new XElement("StatusColorize",s.StatusColorize)).Save(PathName);
         }
 
