@@ -344,18 +344,29 @@ namespace XAnnotation
             PluginEntry.RestoreDoubleClickEdit();
             try
             {
-                var implied = doc.Editor.SelectImplied();
-                ObjectId id;
-                if (implied.Status == PromptStatus.OK && implied.Value.Count > 0)
+                // 双击路径优先：它把"双击到的实体"直接送进待编辑通道，不依赖预选。
+                // 预选经 事件 → Idle → 排队 之后不保证还在（AutoCAD 2020 上实测会丢），
+                // 一丢就退化成"选择要编辑的 X-批注:"提示，用户以为双击没反应。
+                var id = PluginEntry.TakePendingEditId();
+                if (!id.IsNull)
                 {
-                    id = implied.Value.GetObjectIds()[0];
-                    // 双击路径会在 Idle 中重建预选；取得 ID 后立即清除，避免恢复 QPMODE 时再弹快捷特性。
+                    // 双击路径会顺带设预选；这里清掉，避免恢复 QPMODE 时再弹快捷特性。
                     doc.Editor.SetImpliedSelection(new ObjectId[0]);
                 }
                 else
                 {
-                    var options = new PromptEntityOptions("\n选择要编辑的 X-批注: ");
-                    var result = doc.Editor.GetEntity(options); if (result.Status != PromptStatus.OK) return; id = result.ObjectId;
+                    var implied = doc.Editor.SelectImplied();
+                    if (implied.Status == PromptStatus.OK && implied.Value.Count > 0)
+                    {
+                        id = implied.Value.GetObjectIds()[0];
+                        // 常规预选路径：取得 ID 后立即清除，避免恢复 QPMODE 时再弹快捷特性。
+                        doc.Editor.SetImpliedSelection(new ObjectId[0]);
+                    }
+                    else
+                    {
+                        var options = new PromptEntityOptions("\n选择要编辑的 X-批注: ");
+                        var result = doc.Editor.GetEntity(options); if (result.Status != PromptStatus.OK) return; id = result.ObjectId;
+                    }
                 }
                 EditById(doc, id);
             }
