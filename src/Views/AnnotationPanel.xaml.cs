@@ -252,6 +252,14 @@ namespace XAnnotation.Views
             RoleCombo.ItemsSource = AnnotationOptions.Roles;
             // 加载当前设置值
             RefreshControls();
+            // 上次停在哪就先摆到哪（在 Show 之前设 Left/Top，避免"先闪在左上角再跳到右下角"）；
+            // 真实高度要到布局之后才知道，贴边夹取放在 Loaded 里做（见 RestorePanelPosition）。
+            if (!double.IsNaN(_s.PanelLeft) && !double.IsNaN(_s.PanelTop))
+            {
+                _placingPanel = true;
+                try { Left = _s.PanelLeft; Top = _s.PanelTop; }
+                finally { _placingPanel = false; }
+            }
             // 选项变更的防抖：只有在"这一轮已经在跑/已排队"时才需要做点什么（见 OnOptionStartTick）；
             // 面板待命期间改选项只是更新状态，启动交给 StartByTrigger。
             _optionStartTimer = new DispatcherTimer(DispatcherPriority.Normal)
@@ -1172,6 +1180,9 @@ namespace XAnnotation.Views
         /// <summary>面板位置记忆的落盘防抖：拖动过程中每帧都会 LocationChanged，不能每次都写 XML。</summary>
         private DispatcherTimer _positionSaveTimer;
 
+        /// <summary>已经为"高度还没量出来"重试过一次位置还原（防自己调自己）。</summary>
+        private bool _positionRetried;
+
         /// <summary>把面板摆回"上次离开时的位置"；没有记录时沿用老行为（工作区左上角 +20）。
         /// <para><b>为什么必须记位置</b>：面板每次打开都是新实例，<c>Left/Top</c> 从零开始 ——
         /// 用户把快捷菜单拖到图纸右下角，下次 <c>X_PZ_NOTE</c> 又回到屏幕左上角竖排。
@@ -1211,9 +1222,11 @@ namespace XAnnotation.Views
 
             ApplyPanelPosition(left, top);
 
-            // SizeToContent="Height"：Loaded 时高度偶尔还是 0，等布局落定后再按真实高度夹一次。
-            if (ActualHeight <= 0)
+            // SizeToContent="Height"：Loaded 时高度偶尔还是 0，等布局落定后再按真实高度夹一次
+            // （只重试一次：高度真取不到时宁可位置差几像素，也不能自己把自己循环调度下去）。
+            if (ActualHeight <= 0 && !_positionRetried)
             {
+                _positionRetried = true;
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
                     try { RestorePanelPosition(); }
