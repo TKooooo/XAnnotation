@@ -439,7 +439,9 @@ namespace XAnnotation
             catch (System.Exception ex) { doc.Editor.WriteMessage("\n打开知识库失败: " + WpfHost.Describe(ex)); PluginLog.Error("X_PZ_KB", ex); }
         }
 
-        /// <summary>修复复制/粘贴后的批注：全图扫描脱离编组的批注实体，重建编组并恢复识别。</summary>
+        /// <summary>修复复制/粘贴后的批注：全图扫描脱离编组的批注实体，重建编组并恢复识别。
+        /// <para>同时确认本图"编组可整体点选"（PICKSTYLE 的编组位）——少了它，编组建得再对，
+        /// 点批注也只会选中单个实体，看着就是"批注炸开了"。</para></summary>
         [CommandMethod("X_PZ_REPAIR", CommandFlags.Modal)]
         public void RepairAnnotations()
         {
@@ -449,6 +451,8 @@ namespace XAnnotation
                 doc.Editor.WriteMessage("\n正在扫描并修复复制/粘贴产生的批注...");
                 var report = AnnotationService.RepairOrphans(doc);
                 doc.Editor.WriteMessage("\n" + report);
+                if (AnnotationService.EnsureGroupPickStyle(doc))
+                    doc.Editor.WriteMessage("\n已打开本图的编组整体选择（PICKSTYLE）：点批注任意一处即可整体选中。");
                 AnnotationListPanel.RefreshIfOpen();
             }
             catch (System.Exception ex) { doc.Editor.WriteMessage("\n修复失败: " + ex.Message); PluginLog.Error("X_PZ_REPAIR", ex); }

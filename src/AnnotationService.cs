@@ -312,6 +312,7 @@ namespace XAnnotation
                 var group=new Group("X-批注 "+data.Number,true);
                 groups.SetAt(GroupPrefix+data.Id,group);tr.AddNewlyCreatedDBObject(group,true);group.Append(ids);
                 WriteMaster(group,tr,data);
+                LogCreatedAnnotation(doc, tr, group, settings, "CreatePlineCloud");
                 tr.Commit();
                 ArchiveRecord(doc, "创建", data, null);
             }
@@ -893,6 +894,7 @@ namespace XAnnotation
                 var group = new Group("X-批注 " + data.Number, true);
                 groups.SetAt(GroupPrefix + data.Id, group); tr.AddNewlyCreatedDBObject(group, true); group.Append(ids);
                 WriteMaster(group, tr, data);
+                LogCreatedAnnotation(doc, tr, group, settings, "Create");
                 tr.Commit();
                 ArchiveRecord(doc, "创建", data, null);
                 return true;
@@ -3622,8 +3624,56 @@ namespace XAnnotation
         internal static Point2d ClosestCorner4(Point2d[] corners,Point3d p){var target=new Point2d(p.X,p.Y);return corners.OrderBy(c=>c.GetDistanceTo(target)).First();}
         private static bool Contains(Group group,ObjectId id){foreach(ObjectId member in group.GetAllEntityIds())if(member==id)return true;return false;}
 
-        /// <summary>PICKSTYLE=0 的提示只发一次，别每次落图都在命令行刷一遍。</summary>
-        private static bool _pickStyleZeroReported;
+        /// <summary>PICKSTYLE 的纠正提示只发一次，别每次落图都在命令行刷一遍。</summary>
+        private static bool _pickStyleFixedReported;
+
+        /// <summary>保证"点批注任意一处即整体选中"成立：<c>PICKSTYLE</c> 的<b>编组</b>位必须是 1。
+        /// <para><b>为什么必须由插件来做</b>：<c>PICKSTYLE</c> 是位标志（1=编组，2=关联填充），
+        /// 少 1 这一位时 CAD 完全不允许按编组选中 —— 一条批注虽然老老实实建了编组，
+        /// 用户点云线只亮云线、点文字只亮文字，看着就是"批注被炸开了"。
+        /// 这是<b>图级</b>设置（随 DWG 保存），老图纸里常被前人设成 0，靠用户自己去改系统变量不现实。</para>
+        /// <para>只补"编组"这一位，不动"关联填充"；值本来就是 1/3 时什么都不做。
+        /// 返回 <c>true</c> 表示这次真的改过（调用方据此刷新诊断值）。</para></summary>
+        internal static bool EnsureGroupPickStyle(Document doc)
+        {
+            try
+            {
+                var pick = Convert.ToInt32(CadSystemVariable("PICKSTYLE"));
+                if ((pick & 1) != 0) return false;      // 编组位已开，什么都不用做
+                var target = pick | 1;
+                SetCadSystemVariable("PICKSTYLE", target);
+                var now = Convert.ToInt32(CadSystemVariable("PICKSTYLE"));
+                if ((now & 1) == 0)                     // 没改成功（被宿主拒绝）：退回提示
+                {
+                    PluginLog.Warning("Annotation.PickStyle", "PICKSTYLE 由 " + pick + " 改为 " + target + " 未生效，实际仍为 " + now + "。");
+                    try
+                    {
+                        doc.Editor.WriteMessage(
+                            "\n提示：本图 PICKSTYLE=" + now + "，编组无法整体点选。请在命令行输入 PICKSTYLE，设为 1。");
+                    }
+                    catch { }
+                    return false;
+                }
+
+                PluginLog.Info("Annotation.PickStyle", "PICKSTYLE " + pick + " → " + now + "（补上编组整体选择）。");
+                if (!_pickStyleFixedReported)
+                {
+                    _pickStyleFixedReported = true;
+                    try
+                    {
+                        doc.Editor.WriteMessage(
+                            "\n已将本图 PICKSTYLE 由 " + pick + " 改为 " + now + "：点批注任意一处即可整体选中。");
+                    }
+                    catch { }
+                }
+                return true;
+            }
+            catch (System.Exception ex)
+            {
+                PluginLog.Warning("Annotation.PickStyle", ex.Message);
+                return false;
+            }
+        }
 
         /// <summary>把"这条批注落图后的实际情况"写进运行日志（只写日志，不动图）。
         /// <para><b>为什么需要</b>：现场反馈的两类问题——"点云线只选中文字框、不整体选中"和"云线看着零碎"——
@@ -3668,17 +3718,13 @@ namespace XAnnotation
                 try { pickStyle = Convert.ToInt32(CadSystemVariable("PICKSTYLE")).ToString(); }
                 catch { }
 
-                // PICKSTYLE=0 时 CAD 不允许按编组整体点选：点云线只会选中云线本身，点文字框只选文字框。
-                // 这是用户自己图里的全局设置，插件不去改，只提示一次（否则会被当成"批注不成组"的 bug）。
-                if (pickStyle == "0" && !_pickStyleZeroReported)
+                // PICKSTYLE 少了"编组"这一位时，CAD 不允许按编组整体点选：点云线只选中云线、
+                // 点文字框只选中文字 —— 现场表现就是"批注炸开了、不成组"。
+                // 这是图级设置（老图纸常被前人设成 0），插件每画一条就顺手纠正一次：只补这一位，
+                // 不碰"关联填充"那一位；纠正成功才刷新 diag 里的 PICKSTYLE。
+                if (EnsureGroupPickStyle(doc))
                 {
-                    _pickStyleZeroReported = true;
-                    try
-                    {
-                        doc.Editor.WriteMessage(
-                            "\n提示：当前 PICKSTYLE=0，编组无法整体点选（点云线只会选中云线本身）。" +
-                            "在命令行输入 PICKSTYLE 设为 1 后，点任一元素即可选中整条批注。");
-                    }
+                    try { pickStyle = Convert.ToInt32(CadSystemVariable("PICKSTYLE")).ToString(); }
                     catch { }
                 }
 

@@ -281,7 +281,9 @@ namespace XAnnotation
                 // 启动即写日志：构建时间 + DLL 实际加载路径。排查"改了没生效"时，
                 // 看日志最新一条的构建时间就知道 CAD 里跑的是哪个版本（NETLOAD 无法替换运行中的同名程序集）。
                 var buildTime = System.IO.File.GetLastWriteTime(asm.Location);
-                PluginLog.Info("Initialize", "构建于 " + buildTime.ToString("yyyy-MM-dd HH:mm:ss") + "，加载自 " + asm.Location);
+                PluginLog.Info("Initialize",
+                    "版本 " + AppInfo.GetDisplayVersion() + "，构建于 " + buildTime.ToString("yyyy-MM-dd HH:mm:ss") +
+                    "，加载自 " + asm.Location);
 
                 // 环境快照先落地：哪怕是"加载到一半炸了"，也已经留下可判断的现场信息。
                 LogEnvironment();

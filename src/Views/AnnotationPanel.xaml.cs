@@ -260,6 +260,15 @@ namespace XAnnotation.Views
                 try { Left = _s.PanelLeft; Top = _s.PanelTop; }
                 finally { _placingPanel = false; }
             }
+            else
+            {
+                // 没有历史位置：默认落到屏幕右下角（以前是左上角 +20，窄而高的一条竖排长条）。
+                // 这里先用估算高度摆一次，真实高度在 Loaded 里按 RestorePanelPosition 再夹一次。
+                DefaultPanelPosition(0, 0, out var defaultLeft, out var defaultTop);
+                _placingPanel = true;
+                try { Left = defaultLeft; Top = defaultTop; }
+                finally { _placingPanel = false; }
+            }
             // 选项变更的防抖：只有在"这一轮已经在跑/已排队"时才需要做点什么（见 OnOptionStartTick）；
             // 面板待命期间改选项只是更新状态，启动交给 StartByTrigger。
             _optionStartTimer = new DispatcherTimer(DispatcherPriority.Normal)
@@ -1200,8 +1209,8 @@ namespace XAnnotation.Views
             var top = _s.PanelTop;
             if (double.IsNaN(left) || double.IsNaN(top))
             {
-                left = work.Left + 20;
-                top = work.Top + 20;
+                var defaultWidth = ActualWidth > 0 ? ActualWidth : Width;
+                DefaultPanelPosition(defaultWidth, ActualHeight, out left, out top);
                 ApplyPanelPosition(left, top);
                 return;
             }
@@ -1233,6 +1242,21 @@ namespace XAnnotation.Views
                     catch (Exception ex) { PluginLog.Warning("AnnotationPanel.RestorePanelPosition", ex.Message); }
                 }), DispatcherPriority.Loaded);
             }
+        }
+
+        /// <summary>没有历史位置时的默认落点：屏幕<b>右下角</b>。
+        /// <para>以前默认是"工作区左上角 +20"——面板窄而高，落在那儿就是左边一条竖排长条，
+        /// 用户每次都得手动拖到右下角。既然它本来就是"贴在图纸右下空当里用"的，默认值就该在那儿。</para>
+        /// <para>尺寸未知时按 XAML 的默认宽度 292、估算高度 420 摆，真实尺寸到了在
+        /// <see cref="RestorePanelPosition"/> 里再夹一次。</para></summary>
+        private static void DefaultPanelPosition(double width, double height, out double left, out double top)
+        {
+            var work = SystemParameters.WorkArea;
+            const double margin = 16;
+            if (width <= 0) width = 292;
+            if (height <= 0) height = 420;
+            left = Math.Max(work.Left + margin, work.Right - width - margin);
+            top = Math.Max(work.Top + margin, work.Bottom - height - margin);
         }
 
         private void ApplyPanelPosition(double left, double top)
