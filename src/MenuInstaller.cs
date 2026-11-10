@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -252,6 +252,8 @@ namespace XAnnotation
                 // 「快速直绘」不加弹窗，按设置直接进入框选-定位流程（对应工具栏「快」键）。
                 AddCommandMenuItem(menu, index++, "快速直绘", "X_PZ_DRAW");
                 AddCommandMenuItem(menu, index++, "编辑批注", "X_PZ_EDIT");
+                // 「批注列表」紧跟「编辑批注」：查清单 → 点一行定位 → 再编辑，是现场最常见的连续动作。
+                AddCommandMenuItem(menu, index++, "批注列表", "X_PZ_LIST");
                 AddCommandMenuItem(menu, index++, "移动批注", "X_PZ_MOVE");
                 AddCommandMenuItem(menu, index++, "删除批注", "X_PZ_DELETE");
                 AddCommandMenuItem(menu, index++, "隐藏批注", "X_PZ_HIDE");
@@ -262,7 +264,6 @@ namespace XAnnotation
                 AddCommandMenuItem(menu, index++, "刷新批注文字", "X_PZ_REFRESH");
                 AddCommandMenuItem(menu, index++, "单绘云线", "X_PZ_CLOUD");
                 AddCommandMenuItem(menu, index++, "增补云线", "X_PZ_ADDCLOUD");
-                AddCommandMenuItem(menu, index++, "批注列表", "X_PZ_LIST");
                 AddCommandMenuItem(menu, index++, "批注汇总", "X_PZ_SUMMARY");
                 AddCommandMenuItem(menu, index++, "批注清单", "X_PZ_LEGEND");
                 AddCommandMenuItem(menu, index++, "批注历史", "X_PZ_HISTORY");

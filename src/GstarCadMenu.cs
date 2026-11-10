@@ -1,4 +1,4 @@
-#if GSCAD
+﻿#if GSCAD
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -47,6 +47,7 @@ namespace XAnnotation
             "批注绘制|X_PZ_NOTE",
             "快速直绘|X_PZ_DRAW",
             "编辑批注|X_PZ_EDIT",
+            "批注列表|X_PZ_LIST",
             "移动批注|X_PZ_MOVE",
             "删除批注|X_PZ_DELETE",
             "隐藏批注|X_PZ_HIDE",
@@ -57,7 +58,6 @@ namespace XAnnotation
             "刷新批注文字|X_PZ_REFRESH",
             "单绘云线|X_PZ_CLOUD",
             "增补云线|X_PZ_ADDCLOUD",
-            "批注列表|X_PZ_LIST",
             "批注汇总|X_PZ_SUMMARY",
             "批注清单|X_PZ_LEGEND",
             "批注历史|X_PZ_HISTORY",

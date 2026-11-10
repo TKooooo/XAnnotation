@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -24,7 +25,7 @@ using CadApplication = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
 namespace XAnnotation.Views
 {
-    /// <summary>批注清单：表格 + 状态筛选 + 搜索 + 详情，双击行在图纸中定位。
+    /// <summary>批注列表：表格 + 状态筛选 + 搜索 + 详情，双击行在图纸中定位。
     /// <para>数据源统一走 <see cref="AnnotationService.GetAllAnnotations"/>（与 CSV/Word 导出同源），
     /// 本窗口只做筛选、展示与转发命令，不改图纸内容。</para>
     /// <para><b>所有事件处理器都必须走 <see cref="Safe"/> 包一层</b>：宿主 AutoCAD 2014 里没有 WPF
@@ -54,8 +55,14 @@ namespace XAnnotation.Views
         /// <summary>"意见摘要"这一列（唯一弹性列），窗口尺寸变化时重算宽度。</summary>
         private GridViewColumn _summaryColumn;
 
-        /// <summary>把窗口交给 CAD（最小化）之后，用户是否还要看清单——重新打开时用来决定是否还原。</summary>
+        /// <summary>把窗口交给 CAD（最小化）之后，用户是否还要看列表——重新打开时用来决定是否还原。</summary>
         private bool _minimizedForCad;
+
+        /// <summary>定位之后等用户按 Esc 就还原窗口的线程级键盘钩子（见 InstallEscReturnHook）。</summary>
+        private IntPtr _escReturnHook = IntPtr.Zero;
+        private EscReturnProc _escReturnProc;
+        /// <summary>Esc 已经收到、正在（排队）还原窗口；防止连按 Esc 重复排队。</summary>
+        private bool _escReturnPending;
 
         private AnnotationListPanel()
         {
@@ -69,12 +76,13 @@ namespace XAnnotation.Views
             PreviewKeyDown += (s, e) => SafeRun("KeyDown", () => OnPreviewKeyDown(s, e));
             Closing += (_, __) =>
             {
+                RemoveEscReturnHook();
                 _instance = null;
                 _minimizedForCad = false;
             };
         }
 
-        /// <summary>显示或激活批注清单（单例），并刷新数据。</summary>
+        /// <summary>显示或激活批注列表（单例），并刷新数据。</summary>
         public static void ShowOrActivate()
         {
             if (_instance != null && _instance.IsLoaded)
@@ -89,7 +97,7 @@ namespace XAnnotation.Views
             _instance.LoadAnnotations();
         }
 
-        /// <summary>若清单已打开则刷新数据。</summary>
+        /// <summary>若列表已打开则刷新数据。</summary>
         public static void RefreshIfOpen()
         {
             if (_instance != null && _instance.IsLoaded)
@@ -327,8 +335,8 @@ namespace XAnnotation.Views
                 return;
             }
 
-            // 先把清单收起来再定位：清单是置顶窗口，不收起来会一直挡在图纸前面，
-            // 用户看到的就是"点了定位，可屏幕全被清单占着、什么也看不见"。
+            // 先把列表收起来再定位：列表是置顶窗口，不收起来会一直挡在图纸前面，
+            // 用户看到的就是"点了定位，可屏幕全被列表占着、什么也看不见"。
             MinimizeForCad(() =>
             {
                 if (!AnnotationService.ZoomToAnnotation(doc, info.FirstEntityId))
@@ -337,6 +345,8 @@ namespace XAnnotation.Views
                     Notify("定位批注 " + info.Number + " 失败。");
                 }
             });
+            // 定位完焦点在 CAD 上，用户按 Esc（结束缩放/取消选择）时把列表还原回来。
+            InstallEscReturnHook();
         }
 
         private void Mark_Click(object sender, RoutedEventArgs e)
@@ -382,7 +392,7 @@ namespace XAnnotation.Views
 
         private void NewAnnotation_Click(object sender, RoutedEventArgs e) => SafeRun("NewAnnotation", () =>
         {
-            // 同上：清单挡在图纸前面时连"指定第一个角点"都点不到，先收起来再发绘制命令。
+            // 同上：列表挡在图纸前面时连"指定第一个角点"都点不到，先收起来再发绘制命令。
             MinimizeForCad(() => RunCommandDirect("X_PZ_DRAW"));
         });
 
@@ -471,7 +481,7 @@ namespace XAnnotation.Views
 
         // ===================== 与 CAD 的窗口配合 =====================
 
-        /// <summary>把清单最小化，让出图纸；<paramref name="after"/> 在窗口状态落定后再执行。</summary>
+        /// <summary>把列表最小化，让出图纸；<paramref name="after"/> 在窗口状态落定后再执行。</summary>
         private void MinimizeForCad(Action after)
         {
             var scheduled = false;
@@ -501,11 +511,12 @@ namespace XAnnotation.Views
             timer.Start();
         }
 
-        /// <summary>把清单还原成置顶活动窗口（命令再次打开清单时用）。</summary>
+        /// <summary>把列表还原成置顶活动窗口（命令再次打开列表时用）。</summary>
         private void RestoreFromCad()
         {
             try
             {
+                RemoveEscReturnHook();
                 if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
                 if (!IsVisible) Show();
                 Topmost = true;
@@ -513,6 +524,97 @@ namespace XAnnotation.Views
                 _minimizedForCad = false;
             }
             catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.RestoreFromCad", ex.Message); }
+        }
+
+        // ===================== 定位后按 Esc 回到列表 =====================
+
+        // 需求（2026-11-10）："双击意见或定位到图纸后，Esc 退出定位要返回到批注列表界面"。
+        // 定位时列表被最小化、焦点回到 CAD，本窗口收不到任何键盘消息，所以装一个**线程级**键盘钩子：
+        //   WH_KEYBOARD + 本线程 ID —— 只收本线程（＝ CAD 界面线程）的键盘输入，不需要 DLL、
+        //   不跨进程；回调里一律 CallNextHookEx，**绝不吞键**，CAD 自己的 Esc 语义原样保留。
+        // （与 Views/AnnotationPanel.xaml.cs 的 Esc 钩子同一套做法，已在 CAD 2014 上跑通。）
+
+        private delegate IntPtr EscReturnProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        private const int WH_KEYBOARD = 2;
+        private const int VK_ESCAPE = 0x1B;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, EscReturnProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        /// <summary>装上"Esc 还原列表"钩子（幂等）。失败只记日志：列表仍可从任务栏点回来。</summary>
+        private void InstallEscReturnHook()
+        {
+            if (_escReturnHook != IntPtr.Zero) return;
+            try
+            {
+                _escReturnProc = OnEscWhileLocating;
+                _escReturnHook = SetWindowsHookEx(WH_KEYBOARD, _escReturnProc, IntPtr.Zero, GetCurrentThreadId());
+                if (_escReturnHook == IntPtr.Zero)
+                    PluginLog.Warning("AnnotationListPanel.EscHook", "安装键盘钩子失败：定位后需从任务栏找回列表。");
+            }
+            catch (Exception ex)
+            {
+                _escReturnHook = IntPtr.Zero;
+                _escReturnProc = null;
+                PluginLog.Warning("AnnotationListPanel.EscHook", ex.Message);
+            }
+        }
+
+        private void RemoveEscReturnHook()
+        {
+            _escReturnPending = false;
+            if (_escReturnHook == IntPtr.Zero) return;
+            try { UnhookWindowsHookEx(_escReturnHook); }
+            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.EscHook(remove)", ex.Message); }
+            _escReturnHook = IntPtr.Zero;
+            _escReturnProc = null;
+        }
+
+        /// <summary>钩子回调：定位后按 Esc（键按下那一下）就把列表还原。
+        /// <para>WH_KEYBOARD 的 <c>wParam</c> 是虚拟键码，<c>lParam</c> 的 bit31 = 1 表示"抬键"。</para>
+        /// <para>整个回调必须吞掉所有异常：异常越过托管/原生边界会直接崩掉 CAD。</para></summary>
+        private IntPtr OnEscWhileLocating(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            try
+            {
+                var isKeyDown = (lParam.ToInt64() & 0x80000000L) == 0;
+                if (nCode >= 0 && isKeyDown && wParam.ToInt64() == VK_ESCAPE && !_escReturnPending)
+                {
+                    _escReturnPending = true;
+                    // 不能在钩子回调里直接动窗口（钩子栈很浅，且此时 CAD 正在处理这次按键）。
+                    Dispatcher.BeginInvoke(new Action(() => SafeRun("EscReturn", ReturnFromLocate)), DispatcherPriority.Normal);
+                }
+            }
+            catch (Exception ex)
+            {
+                try { PluginLog.Warning("AnnotationListPanel.EscHook(tick)", ex.Message); } catch { }
+            }
+
+            // 永不吞键：CAD 自己的 Esc（结束缩放、取消命令、清除选择）必须原样收到。
+            return CallNextHookEx(_escReturnHook, nCode, wParam, lParam);
+        }
+
+        /// <summary>用户按 Esc 结束定位：把列表摆回来。
+        /// <para>如果用户已经自己点回列表（窗口不再是最小化），就只摘钩子、不再重摆一次。</para></summary>
+        private void ReturnFromLocate()
+        {
+            var stillMinimized = false;
+            try { stillMinimized = _minimizedForCad && WindowState == WindowState.Minimized; }
+            catch { }
+            RemoveEscReturnHook();
+            if (!stillMinimized) return;
+            PluginLog.Info("AnnotationListPanel.EscHook", "定位后收到 Esc，还原批注列表。");
+            RestoreFromCad();
         }
 
         /// <summary>
@@ -557,7 +659,7 @@ namespace XAnnotation.Views
 
         private void Notify(string message)
         {
-            try { MessageBox.Show(this, message, "批注清单", MessageBoxButton.OK, MessageBoxImage.Information); }
+            try { MessageBox.Show(this, message, "批注列表", MessageBoxButton.OK, MessageBoxImage.Information); }
             catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.Notify", ex.Message); }
         }
 
@@ -574,7 +676,7 @@ namespace XAnnotation.Views
                 {
                     if (StatusText != null) StatusText.Text = "操作失败（已记录日志）：" + ex.Message;
                     var doc = CadApplication.DocumentManager.MdiActiveDocument;
-                    if (doc != null) doc.Editor.WriteMessage("\nX-批注清单出错（已记录日志）：" + ex.Message);
+                    if (doc != null) doc.Editor.WriteMessage("\nX-批注列表出错（已记录日志）：" + ex.Message);
                 }
                 catch { }
             }
