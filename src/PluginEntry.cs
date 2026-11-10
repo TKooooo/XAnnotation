@@ -86,6 +86,23 @@ namespace XAnnotation
         /// 既是"双击后马上出编辑框"，又给迟到的原生命令留出被拦下的窗口。</para></summary>
         private const double SuppressedFallbackSeconds = 0.25;
 
+        /// <summary>排队发出的 X_PZ_EDIT 迟迟不开跑时的等待上限（秒），超过就发一次 Esc 清掉挂起状态。
+        /// <para>这条兜底专治"命令排在一条已被打断的原生命令后面、必须手动按 Esc"的现场问题。</para></summary>
+        private const double EditStartWatchdogSeconds = 1.0;
+
+        /// <summary>本次双击编辑的 X_PZ_EDIT 是什么时候发出去的（<see cref="DateTime.MinValue"/> = 没在等）。</summary>
+        private static DateTime _editLaunchUtc = DateTime.MinValue;
+
+        /// <summary>那条 X_PZ_EDIT 是否已经真正跑起来（由命令入口回调置位）。</summary>
+        private static bool _editCommandStarted;
+
+        /// <summary>命令入口调用：标记"排队的 X_PZ_EDIT 已经开始执行"，看门狗不再发 Esc。</summary>
+        internal static void NotifyEditCommandStarted()
+        {
+            _editCommandStarted = true;
+            _editLaunchUtc = DateTime.MinValue;
+        }
+
         /// <summary>依赖兜底解析：已在自己目录里找过的程序集名（防同名重入死循环）。</summary>
         private static readonly HashSet<string> ResolvingAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         /// <summary>加载失败提示只弹一次。</summary>
@@ -772,6 +789,25 @@ namespace XAnnotation
                 else idleStillNeeded = true;
             }
 
+            // 已排队 X_PZ_EDIT 的看门狗：命令迟迟没开跑，说明 CAD 还卡在某个"正在执行命令"的状态里
+            // （典型来源就是被 Veto 掉的那条原生双击命令）。替用户按一次 Esc，队列立刻通畅。
+            if (_editLaunchUtc != DateTime.MinValue && !_editCommandStarted)
+            {
+                if ((DateTime.UtcNow - _editLaunchUtc).TotalSeconds > EditStartWatchdogSeconds)
+                {
+                    _editLaunchUtc = DateTime.MinValue;
+                    try
+                    {
+                        var doc = CadApplication.DocumentManager.MdiActiveDocument;
+                        PluginLog.Warning("DoubleClick.Watchdog",
+                            "X_PZ_EDIT 在 " + EditStartWatchdogSeconds.ToString("0.#") + " 秒内没有启动：发一次 Esc 解除 CAD 的挂起状态。");
+                        doc?.SendStringToExecute("\x1b", true, false, false);
+                    }
+                    catch (System.Exception ex) { PluginLog.Error("DoubleClick.Watchdog", ex); }
+                }
+                else idleStillNeeded = true;
+            }
+
             if (!idleStillNeeded) DetachIdle();
         }
 
@@ -793,6 +829,12 @@ namespace XAnnotation
                 PluginLog.Info("DoubleClick.Launch", "启动 X_PZ_EDIT（" + reason + "）。");
                 doc.Editor.SetImpliedSelection(new[] { id });
                 doc.SendStringToExecute("X_PZ_EDIT ", true, false, false);
+                // 看门狗：个别宿主会把排队命令压在"文档正在执行命令"的状态后面（现场表现就是
+                // "双击要按一下 Esc 才弹出编辑框"）。1 秒内没见到命令真正开跑，就替用户按一次 Esc
+                // 把挂起状态清掉 —— 已经排队的那条 X_PZ_EDIT 随后就会执行，不需要重发。
+                _editCommandStarted = false;
+                _editLaunchUtc = DateTime.UtcNow;
+                AttachIdle();
             }
             catch (System.Exception ex)
             {

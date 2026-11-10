@@ -336,6 +336,8 @@ namespace XAnnotation
         public void EditAnnotation()
         {
             var doc = CadApplication.DocumentManager.MdiActiveDocument;
+            // 命令真的跑起来了：告诉双击路径的看门狗"不用再发 Esc 了"。
+            PluginEntry.NotifyEditCommandStarted();
             if (doc == null) { PluginEntry.RestoreQuickPropertiesMode(); return; }
             // 双击路径一进入命令就把 DBLCLKEDIT 还回去（不能等 finally：编辑窗一开就是几十秒，
             // 这期间 DBLCLKEDIT=0 会让用户对别的对象双击也没反应）。
