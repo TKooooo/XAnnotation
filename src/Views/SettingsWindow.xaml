@@ -1,4 +1,4 @@
-<Window x:Class="XAnnotation.Views.SettingsWindow"
+﻿<Window x:Class="XAnnotation.Views.SettingsWindow"
         x:ClassModifier="internal"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -300,6 +300,40 @@
                             <TextBox x:Name="CheckHeightText" Grid.Row="1" Grid.Column="1" IsEnabled="False"
                                      ToolTip="当前版本尚未生成审批标记实体"/>
                         </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- ═══════════ 命令 ═══════════ -->
+            <TabItem Header="命令">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16,10">
+                    <StackPanel>
+                        <TextBlock Text="自定义命令名" Style="{StaticResource SectionHeader}" Margin="0,0,0,6"/>
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,10"
+                                   Text="给常用的功能起一个自己顺手的命令名（英文/数字/下划线/短横线，如 PZ、PZ_LIST），留空＝沿用默认名。默认命令一直可用，菜单和工具栏也不受影响——改的只是「你敲什么能叫出它」。"/>
+                        <!-- 表头：三列宽度与代码里生成的行必须一致（230/150/120），否则列会错位。
+                             第三列 120 与其它页的输入列宽保持同一约定。 -->
+                        <Grid Margin="0,0,0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="230"/>
+                                <ColumnDefinition Width="150"/>
+                                <ColumnDefinition Width="120"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="功能" Style="{StaticResource FieldLabel}"/>
+                            <TextBlock Grid.Column="1" Text="默认命令" Style="{StaticResource FieldLabelLeft}"/>
+                            <TextBlock Grid.Column="2" Text="自定义命令" Style="{StaticResource FieldLabelLeft}"/>
+                        </Grid>
+                        <!-- 行在 SettingsWindow.xaml.cs 里按 CommandCatalog.All 生成（命令清单只有一个出处） -->
+                        <StackPanel x:Name="CommandAliasPanel"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                            <Button Content="全部恢复默认" Style="{StaticResource SecondaryButton}"
+                                    Click="ResetCommandAliases_Click"/>
+                            <TextBlock x:Name="CommandAliasHint" Style="{StaticResource Caption}"
+                                       Margin="10,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                        </StackPanel>
+                        <Rectangle Style="{StaticResource SectionSeparator}"/>
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                   Text="说明：别名保存后立刻生效，不用重启 CAD；但 AutoLISP 的命令定义属于单张图纸，新开的图纸会自动再注册一次。不要用 CAD 自带的命令或快捷键（如 L、C、CO、E）当别名，保存时会提示。——设置里保存的只是「多一个名字」，删除别名也不会影响原来的默认命令。"/>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>

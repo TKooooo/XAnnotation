@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Xml.Linq;
 
 namespace XAnnotation
@@ -46,6 +48,9 @@ namespace XAnnotation
                 s.NextNumber = ParseInt(Get(x, "NextNumber", "1"), 1);
                 // 批注编号前缀（1.0.11 起可配）：老配置没有该节点 → 用默认 "X"，编号仍是 X-001。
                 s.NumberPrefix = AnnotationNumbering.NormalizePrefix(Get(x, "NumberPrefix", AnnotationNumbering.DefaultPrefix));
+                // 自定义命令名（1.0.12 起）：老配置没有该节点 → 空表，全部沿用默认命令名。
+                // 读的时候再校验一遍：手改坏的、命令已下线的、重名的，一律丢掉而不是带进运行期。
+                s.CommandAliases = LoadCommandAliases(x);
                 s.AutoCloseOrtho=ParseBool(Get(x,"AutoCloseOrtho","true"),true);s.AutoCloseSnap=ParseBool(Get(x,"AutoCloseSnap","true"),true);s.ViewTopIsNorth=ParseBool(Get(x,"ViewTopIsNorth","true"),true);s.DoubleClickEdit=ParseBool(Get(x,"DoubleClickEdit","true"),true);s.ContinuousAnnotation=ParseBool(Get(x,"ContinuousAnnotation","true"),true);s.CloudOnly=ParseBool(Get(x,"CloudOnly","false"),false);s.SameColors=ParseBool(Get(x,"SameColors","true"),true);s.LayerAppendDate=ParseBool(Get(x,"LayerAppendDate","true"),true);s.LayerAppendName=ParseBool(Get(x,"LayerAppendName","false"),false);s.DateBeforeName=ParseBool(Get(x,"DateBeforeName","true"),true);s.Connector=Get(x,"Connector","-");s.Plottable=ParseBool(Get(x,"Plottable","false"),false);s.CheckHeight=ParseDouble(Get(x,"CheckHeight","8"),8);
                 s.AutoTextViewPercent=ParseDouble(Get(x,"AutoTextViewPercent","5"),5);
                 s.ShowDiscipline=ParseBool(Get(x,"ShowDiscipline","true"),true);s.ShowAuthor=ParseBool(Get(x,"ShowAuthor","true"),true);s.ShowRole=ParseBool(Get(x,"ShowRole","true"),true);s.ShowDate=ParseBool(Get(x,"ShowDate","true"),true);s.ShowStatus=ParseBool(Get(x,"ShowStatus","true"),true);s.ShowDrawingNo=ParseBool(Get(x,"ShowDrawingNo","true"),true);
@@ -95,6 +100,12 @@ namespace XAnnotation
                 new XElement("DefaultRole",s.DefaultRole),new XElement("AutoNumber", s.AutoNumber), new XElement("NextNumber", s.NextNumber),
                 // 编号前缀：空值会被规范成默认 "X"，所以这里直接写规范化后的值。
                 new XElement("NumberPrefix", AnnotationNumbering.NormalizePrefix(s.NumberPrefix)),
+                // 自定义命令名：每个别名一个节点，Command 写默认命令名、值写用户起的名（都已规范化）。
+                new XElement("CommandAliases", (s.CommandAliases ?? new Dictionary<string, string>())
+                    .Where(pair => CommandCatalog.Find(pair.Key) != null && !string.IsNullOrWhiteSpace(pair.Value))
+                    .Select(pair => new XElement("Alias",
+                        new XAttribute("Command", CommandCatalog.Canonical(pair.Key)),
+                        pair.Value.Trim().ToUpperInvariant()))),
                 new XElement("AutoCloseOrtho",s.AutoCloseOrtho),new XElement("AutoCloseSnap",s.AutoCloseSnap),new XElement("ViewTopIsNorth",s.ViewTopIsNorth),new XElement("DoubleClickEdit",s.DoubleClickEdit),new XElement("ContinuousAnnotation",s.ContinuousAnnotation),new XElement("CloudOnly",s.CloudOnly),new XElement("SameColors",s.SameColors),new XElement("LayerAppendDate",s.LayerAppendDate),new XElement("LayerAppendName",s.LayerAppendName),new XElement("DateBeforeName",s.DateBeforeName),new XElement("Connector",s.Connector),new XElement("Plottable",s.Plottable),new XElement("CheckHeight",s.CheckHeight.ToString(CultureInfo.InvariantCulture)),new XElement("AutoTextViewPercent",s.AutoTextViewPercent.ToString(CultureInfo.InvariantCulture)),
                 new XElement("ShowDiscipline",s.ShowDiscipline),new XElement("ShowAuthor",s.ShowAuthor),new XElement("ShowRole",s.ShowRole),new XElement("ShowDate",s.ShowDate),new XElement("ShowStatus",s.ShowStatus),new XElement("ShowDrawingNo",s.ShowDrawingNo),
                 new XElement("ArchiveOnCreate",s.ArchiveOnCreate),new XElement("ContentSuggest",s.ContentSuggest),
@@ -106,6 +117,30 @@ namespace XAnnotation
                 new XElement("PanelLeft",s.PanelLeft.ToString("R",CultureInfo.InvariantCulture)),
                 new XElement("PanelTop",s.PanelTop.ToString("R",CultureInfo.InvariantCulture)),
                 new XElement("StatusColorize",s.StatusColorize)).Save(PathName);
+        }
+
+        /// <summary>读「自定义命令名」。缺损/非法项一律跳过（返回空表＝全部用默认命令名），
+        /// 不让一个手改坏的节点把整份设置读崩。</summary>
+        private static Dictionary<string, string> LoadCommandAliases(XElement x)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var root = x.Element("CommandAliases");
+                if (root == null) return map;
+                foreach (var alias in root.Elements("Alias"))
+                {
+                    var command = CommandCatalog.Canonical((string)alias.Attribute("Command"));
+                    if (command.Length == 0 || CommandCatalog.Find(command) == null) continue;
+                    if (!CommandAliases.TryNormalize((string)alias, out var name, out _)) continue;
+                    if (name.Length == 0) continue;
+                    // 两个命令被填成同一个名字时只认第一个，避免后者的 defun 把前者顶掉。
+                    if (map.ContainsValue(name)) continue;
+                    map[command] = name;
+                }
+            }
+            catch (Exception ex) { PluginLog.Warning("Settings.LoadCommandAliases", ex.Message); }
+            return map;
         }
 
         private static string Get(XElement x, string n, string f) => (string)x.Element(n) ?? f;

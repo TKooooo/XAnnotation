@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace XAnnotation
 {
@@ -86,6 +87,12 @@ namespace XAnnotation
         /// <para>规范化 / 拼接统一走 <see cref="AnnotationNumbering"/>；改前缀<b>只影响之后新建的批注</b>，
         /// 图内已有编号不动（编号是导出/导入的匹配键）。</para></summary>
         public string NumberPrefix { get; set; } = AnnotationNumbering.DefaultPrefix;
+        /// <summary>自定义命令名（设置窗口「命令」页）：<b>键＝默认命令名</b>（如 <c>X_PZ_LIST</c>），
+        /// 值＝用户想要的名字（如 <c>PZLIST</c>）。没有键＝该命令不改名，值一律大写且已通过校验。
+        /// <para>只是<b>额外注册一层别名</b>（见 <see cref="CommandAliases"/>）：默认命令始终可用，
+        /// 菜单/工具栏/帮助里写的也还是默认名，所以这里怎么改都不会影响已有功能。</para></summary>
+        public Dictionary<string, string> CommandAliases { get; set; } =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public bool AutoCloseOrtho { get; set; } = true;
         public bool AutoCloseSnap { get; set; } = true;
         public bool ViewTopIsNorth { get; set; } = true;

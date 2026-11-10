@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -6,6 +6,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 
 namespace XAnnotation.Views
 {
@@ -16,6 +17,11 @@ namespace XAnnotation.Views
         private bool _scaleChanging;
         /// <summary>用户在本次打开设置窗口期间是否真的动过比例下拉。</summary>
         private bool _scaleTouchedByUser;
+
+        /// <summary>「命令」页里生成的输入框：默认命令名 → 输入框（保存时按这份表取值）。</summary>
+        private readonly Dictionary<string, TextBox> _aliasBoxes =
+            new Dictionary<string, TextBox>(StringComparer.OrdinalIgnoreCase);
+
         public AnnotationSettings Value => _s;
 
         /// <summary>当前打开着的设置窗口（单例）。非模态，与批注面板各自独立。</summary>
@@ -86,6 +92,7 @@ namespace XAnnotation.Views
             var styles = new List<string> { "Standard" };
             if (textStyles != null) styles.AddRange(textStyles.Where(s => !string.Equals(s, "Standard", StringComparison.OrdinalIgnoreCase)));
             TextStyleCombo.ItemsSource = styles;
+            BuildCommandAliasRows();
             LoadValues();
             Loaded += (s, e) => { WindowSizing.FitToWorkArea(this, 0.9, 0.86); RefreshDependencies(); };
             // 点谁谁在前：设置窗口与批注面板都是置顶窗口，被激活时主动顶到最上层，
@@ -95,8 +102,7 @@ namespace XAnnotation.Views
 
         private void LoadValues()
         {
-            ShapeCombo.Text = _s.Shape; CloudStyleCombo.Text = _s.CloudStyle;
-            Set(CloudRadiusText, _s.CloudRadius); Set(LineWidthText, _s.LineWidth);
+            ShapeCombo.Text = _s.Shape; CloudStyleCombo.Text = _s.CloudStyle;            Set(CloudRadiusText, _s.CloudRadius); Set(LineWidthText, _s.LineWidth);
             CloudAutoFitCheck.IsChecked = _s.CloudAutoFit; FontAutoFitCheck.IsChecked = _s.FontAutoFit;
             Set(AutoTextViewPercentText, _s.AutoTextViewPercent);
             // 旧配置里存的是"全局比例"数字；这里统一按"1:N 出图比例"显示。
@@ -129,6 +135,119 @@ namespace XAnnotation.Views
             ShowDateCheck.IsChecked = _s.ShowDate; ShowStatusCheck.IsChecked = _s.ShowStatus;
             ShowDrawingNoCheck.IsChecked = _s.ShowDrawingNo;
             ExportShotStyleCombo.SelectedIndex = ExportShotToIndex(_s.ExportShotStyle);
+            LoadCommandAliases();
+        }
+
+        // ===== 「命令」页：自定义命令名 =====
+
+        /// <summary>按命令清单生成「命令」页的行。清单只有一份（<see cref="CommandCatalog"/>），
+        /// 加/删命令只改那一处，这里不用动；列宽必须与 XAML 里的表头一致（230/150/120）。</summary>
+        private void BuildCommandAliasRows()
+        {
+            if (CommandAliasPanel == null) return;
+            CommandAliasPanel.Children.Clear();
+            _aliasBoxes.Clear();
+
+            var labelStyle = TryFindResource("FieldLabel") as Style;
+            var headerStyle = TryFindResource("SectionHeader") as Style;
+            var muted = TryFindResource("TextMutedBrush") as Brush ?? Brushes.Gray;
+
+            string group = null;
+            foreach (var entry in CommandCatalog.All)
+            {
+                if (!string.Equals(group, entry.Group, StringComparison.Ordinal))
+                {
+                    group = entry.Group;
+                    CommandAliasPanel.Children.Add(new TextBlock
+                    {
+                        Text = group,
+                        Style = headerStyle,
+                        Margin = new Thickness(0, 12, 0, 4)
+                    });
+                }
+
+                var row = new Grid { Margin = new Thickness(0, 1, 0, 1) };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(230) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
+
+                var label = new TextBlock { Text = entry.Label, Style = labelStyle };
+                Grid.SetColumn(label, 0);
+                row.Children.Add(label);
+
+                // 默认命令名用等宽字体、弱化颜色：它是"说明书"，不是可编辑内容。
+                var command = new TextBlock
+                {
+                    Text = entry.Command,
+                    Foreground = muted,
+                    FontFamily = new FontFamily("Consolas, Microsoft YaHei UI"),
+                    FontSize = 12,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(6, 0, 0, 0)
+                };
+                Grid.SetColumn(command, 1);
+                row.Children.Add(command);
+
+                var box = new TextBox
+                {
+                    MaxLength = CommandAliases.MaxLength,
+                    ToolTip = "留空＝沿用 " + entry.Command + "。只能填英文/数字/下划线/短横线。"
+                };
+                box.TextChanged += (s, e) => { try { RefreshAliasHint(); } catch { /* 提示而已，不能把窗口搞崩 */ } };
+                Grid.SetColumn(box, 2);
+                row.Children.Add(box);
+
+                _aliasBoxes[entry.Command] = box;
+                CommandAliasPanel.Children.Add(row);
+            }
+        }
+
+        /// <summary>把设置里的别名填回输入框（没有的留空）。</summary>
+        private void LoadCommandAliases()
+        {
+            foreach (var entry in CommandCatalog.All)
+            {
+                if (!_aliasBoxes.TryGetValue(entry.Command, out var box)) continue;
+                var alias = _s.CommandAliases != null && _s.CommandAliases.TryGetValue(entry.Command, out var saved) ? saved : "";
+                box.Text = alias ?? "";
+            }
+            RefreshAliasHint();
+        }
+
+        /// <summary>把输入框内容整理成「默认命令 → 自定义名」。<paramref name="errors"/> 非空表示有填错的行，
+        /// 调用方应拦下保存并提示（返回的表此时只含合法项）。校验规则与运行期完全同一份（见 <see cref="CommandAliases.Normalized"/>）。</summary>
+        private Dictionary<string, string> ReadCommandAliases(List<string> errors)
+        {
+            var raw = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in CommandCatalog.All)
+            {
+                if (!_aliasBoxes.TryGetValue(entry.Command, out var box)) continue;
+                var text = (box.Text ?? "").Trim();
+                if (text.Length > 0) raw[entry.Command] = text;
+            }
+            var probe = new AnnotationSettings { CommandAliases = raw };
+            return CommandAliases.Normalized(probe, out errors);
+        }
+
+        private void RefreshAliasHint()
+        {
+            if (CommandAliasHint == null) return;
+            var count = 0;
+            foreach (var box in _aliasBoxes.Values)
+                if (!string.IsNullOrWhiteSpace(box.Text)) count++;
+            CommandAliasHint.Text = count == 0
+                ? "当前全部使用默认命令名。"
+                : "已自定义 " + count + " 个，保存后立即生效。";
+        }
+
+        private void ResetCommandAliases_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                foreach (var box in _aliasBoxes.Values) box.Text = "";
+                RefreshAliasHint();
+            }
+            catch (Exception ex) { PluginLog.Warning("Settings.CommandAliases.Reset", ex.Message); }
         }
 
         private void Save_Click(object sender, RoutedEventArgs e)
@@ -188,7 +307,23 @@ namespace XAnnotation.Views
                 // 注意**不要把 ReplyColor / PassColor 卷进来**：它们是"整条批注的状态色"，
                 // 不属于分项着色，被覆盖的话用户在「状态颜色」里挑的已回复/已完成颜色保存后就被冲成统一色了。
                 if (_s.SameColors) _s.CloudColor = _s.LeaderColor = _s.TextColor = _s.BoxColor = _s.CheckColor = _s.ColorIndex;
+
+                // 自定义命令名：先整体校验再落盘——填错的（中文/带空格/顶到 CAD 内置命令/两个功能重名）
+                // 一律拦在这里，不要让一个用不了的别名进 settings.xml、到命令行为止才发现。
+                var aliasErrors = new List<string>();
+                var aliases = ReadCommandAliases(aliasErrors);
+                if (aliasErrors.Count > 0)
+                {
+                    MessageBox.Show(this,
+                        "命令名有误，改好之后再保存：\n\n" + string.Join("\n", aliasErrors.ToArray()),
+                        "X-批注", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                _s.CommandAliases = aliases;
+
                 SettingsStore.Save(_s);
+                // 别名立刻生效（不用重启 CAD、也不用重开图）：按新设置重新注册一遍。
+                CommandAliases.ApplyActive();
                 // 非模态窗口：不能给 DialogResult 赋值（非对话框窗口赋值会抛 InvalidOperationException），直接关。
                 try { Saved?.Invoke(); } catch (Exception ex) { PluginLog.Warning("SettingsWindow.Saved", ex.Message); }
                 Close();

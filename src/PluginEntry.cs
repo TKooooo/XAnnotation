@@ -349,6 +349,8 @@ namespace XAnnotation
                     catch (System.Exception ex) { failedSteps.Add("DrawingScale"); PluginLog.Error("Initialize.DrawingScale", ex); }
                     try { ObserveDatabase(doc.Database); }
                     catch (System.Exception ex) { failedSteps.Add("ObserveDatabase"); PluginLog.Error("Initialize.ObserveDatabase", ex); }
+                    try { CommandAliases.Apply(doc); }
+                    catch (System.Exception ex) { failedSteps.Add("CommandAliases"); PluginLog.Error("Initialize.CommandAliases", ex); }
                 }
 
                 // 双击编辑能不能用，取决于两处"参数"，远程排障时最常被问到；这里一次写全，
@@ -432,6 +434,9 @@ namespace XAnnotation
                 DrawingScale.Forget();
                 DrawingScale.Ensure(e.Document);
                 ObserveDatabase(e.Document?.Database);
+                // 自定义命令名：AutoLISP 的 c: 定义属于单张图纸，换图/开图都要重新注册一遍
+                // （同一张图、同一套别名只送一次，见 CommandAliases.Apply 的指纹判断）。
+                CommandAliases.Apply(e.Document);
                 XAnnotation.Views.AnnotationPanel.HandleDocumentActivated(e.Document);
                 XAnnotation.Views.AnnotationListPanel.RefreshIfOpen();
             }
