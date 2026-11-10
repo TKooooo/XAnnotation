@@ -82,6 +82,10 @@ namespace XAnnotation
         public string DefaultRole { get; set; } = "批注人";
         public bool AutoNumber { get; set; } = true;
         public int NextNumber { get; set; } = 1;
+        /// <summary>批注编号前缀（设置窗口「编号前缀」）。编号 = 前缀 + 三位序号，默认 "X" → <c>X-001</c>。
+        /// <para>规范化 / 拼接统一走 <see cref="AnnotationNumbering"/>；改前缀<b>只影响之后新建的批注</b>，
+        /// 图内已有编号不动（编号是导出/导入的匹配键）。</para></summary>
+        public string NumberPrefix { get; set; } = AnnotationNumbering.DefaultPrefix;
         public bool AutoCloseOrtho { get; set; } = true;
         public bool AutoCloseSnap { get; set; } = true;
         public bool ViewTopIsNorth { get; set; } = true;
@@ -129,6 +133,15 @@ namespace XAnnotation
         public bool ShowStatus { get; set; } = true;
         public bool ShowDrawingNo { get; set; } = true;
         public bool ArchiveOnCreate { get; set; } = true; // 立即入库：创建/修改批注时写入知识库（KnowledgeStore / knowledge.json）
+        /// <summary>导出 Word 回复单时截图的底色处理方式（用户 2026-11-10 要求「白底黑字」）：
+        /// <list type="bullet">
+        /// <item><b>0 = 白底黑字</b>（默认）：CAD 的黑底彩线截图转成白底、全黑墨迹，像黑白打印稿。</item>
+        /// <item><b>1 = 白底彩色</b>：背景转白，线/字保留原色相但压深（已回复/已完成的状态色仍分得出）。</item>
+        /// <item><b>2 = 保持原样</b>：仍是 CAD 的黑底截图。</item>
+        /// </list>
+        /// <para>转换只改图片像素，<b>不动图形、也不动 CAD 的显示设置</b>，
+        /// 所以导出中途出错也不会把用户界面留成白底（见 WordExporter.ToInkOnWhite）。</para></summary>
+        public int ExportShotStyle { get; set; } = 0;
         /// <summary>输入建议：批注内容输入框是否实时给出补全/续写候选（来源：批注历史记录 / 常用批注语 / 知识库条目）。</summary>
         public bool ContentSuggest { get; set; } = true;
 

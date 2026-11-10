@@ -8,6 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 #if ZWCAD
 using CadApplication = ZwSoft.ZwCAD.ApplicationServices.Core.Application;
@@ -28,6 +29,10 @@ namespace XAnnotation.Views
     /// <summary>批注列表：表格 + 状态筛选 + 搜索 + 详情，双击行在图纸中定位。
     /// <para>数据源统一走 <see cref="AnnotationService.GetAllAnnotations"/>（与 CSV/Word 导出同源），
     /// 本窗口只做筛选、展示与转发命令，不改图纸内容。</para>
+    /// <para><b>窗口层级</b>：本窗口<b>不是</b> <c>Topmost</c> 窗口，而是挂在 CAD 主窗口上的
+    /// <b>从属窗口</b>（Owner = CAD 主框架）。从属窗口天然压在属主之上（点 CAD 时一起抬起来），
+    /// 但不会盖住其它程序——这是"启动批注列表后别的软件界面都被挡住"的修法，
+    /// 详见下方「与 CAD 的窗口配合」一节。</para>
     /// <para><b>所有事件处理器都必须走 <see cref="Safe"/> 包一层</b>：宿主 AutoCAD 2014 里没有 WPF
     /// <c>Application</c> 对象（见 <see cref="WpfGuard"/> 的说明），任何漏出去的异常都会让 CAD 直接
     /// "致命错误"退出。以前筛选胶囊一点就崩，就是异常没人接。</para></summary>
@@ -55,18 +60,18 @@ namespace XAnnotation.Views
         /// <summary>"意见摘要"这一列（唯一弹性列），窗口尺寸变化时重算宽度。</summary>
         private GridViewColumn _summaryColumn;
 
-        /// <summary>把窗口交给 CAD（最小化）之后，用户是否还要看列表——重新打开时用来决定是否还原。</summary>
-        private bool _minimizedForCad;
+        /// <summary>"把窗口交给 CAD（最小化）→ 用户按 Esc 回来"这一轮是否还没结束。
+        /// <para><b>只看这个标志，不再看 <c>WindowState</c></b>：以前要求"标志为真 且 当前确实最小化"才还原，
+        /// 只要中间有任何一步让窗口状态对不上（用户从任务栏点回来、最小化被系统动作抢先），
+        /// Esc 就会走进"静默返回分支"——什么都不做、只把钩子摘掉，现场就是
+        /// <b>"按了 Esc 却回不到批注列表"</b>。现在只要这一轮没结束，Esc 一律还原（还原是幂等的）。</para></summary>
+        private bool _locating;
 
         /// <summary>定位之后等用户按 Esc 就还原窗口的线程级键盘钩子（见 InstallEscReturnHook）。</summary>
         private IntPtr _escReturnHook = IntPtr.Zero;
         private EscReturnProc _escReturnProc;
         /// <summary>Esc 已经收到、正在（排队）还原窗口；防止连按 Esc 重复排队。</summary>
         private bool _escReturnPending;
-
-        /// <summary>为了不挡住 CAD / 文件对话框而临时摘掉了置顶，等用户点回列表时再置顶。
-        /// （发命令、定位、弹保存框三种场合都会摘，见 <see cref="ReleaseTopmost"/>。）</summary>
-        private bool _topmostSuspended;
 
         private AnnotationListPanel()
         {
@@ -76,15 +81,16 @@ namespace XAnnotation.Views
             CadDialog.RegisterFloating(this);
 
             Loaded += OnPanelLoaded;
-            // 摘掉置顶之后只在"用户重新点回列表"这一刻恢复，见 ReleaseTopmost 的说明。
-            Activated += (s, e) => SafeRun("Activated", RestoreTopmostNow);
+            // 本窗口不是置顶窗口（见类注释）：被激活时自己抬一次到 CAD 之上，兜住"从最小化恢复时
+            // Windows 偶尔把窗口留在属主后面"这种情况。
+            Activated += (s, e) => SafeRun("Activated", RaiseAboveCad);
             SizeChanged += (_, __) => SafeRun("Resize", ResizeSummaryColumn);
             PreviewKeyDown += (s, e) => SafeRun("KeyDown", () => OnPreviewKeyDown(s, e));
             Closing += (_, __) =>
             {
                 RemoveEscReturnHook();
+                _locating = false;
                 _instance = null;
-                _minimizedForCad = false;
             };
         }
 
@@ -328,9 +334,9 @@ namespace XAnnotation.Views
             return null;
         }
 
-        private void Locate_Click(object sender, RoutedEventArgs e) => SafeRun("Locate", () => Locate(SelectedInfo));
+        private void Locate_Click(object sender, RoutedEventArgs e) => SafeRun("Locate", () => Locate(SelectedInfo, "按钮"));
 
-        private void Locate(AnnotationService.AnnotationInfo info)
+        private void Locate(AnnotationService.AnnotationInfo info, string source = "双击")
         {
             if (info == null) { Notify("请先在列表里选中一条批注。"); return; }
             var doc = CadApplication.DocumentManager.MdiActiveDocument;
@@ -341,18 +347,31 @@ namespace XAnnotation.Views
                 return;
             }
 
-            // 先把列表收起来再定位：列表是置顶窗口，不收起来会一直挡在图纸前面，
+            // 顺序很重要（1.0.11 用户反馈"按了 Esc 回不来"后调整）：
+            //   ① 先装 Esc 钩子 → ② 再最小化 → ③ 最后（延时）缩放。
+            // 以前是"先最小化、装钩子、再缩放"，中间任何一步出错或被打断都会留下
+            // "窗口已经收起、但没有任何机制把它叫回来"的状态。现在钩子一定先就位。
+            _locating = true;
+            InstallEscReturnHook();
+            PluginLog.Info("AnnotationListPanel.Locate",
+                "来源=" + source + " 编号=" + info.Number + " 窗口状态=" + WindowState + " 钩子=" + (_escReturnHook != IntPtr.Zero ? "OK" : "失败"));
+            if (_escReturnHook == IntPtr.Zero)
+            {
+                // 钩子装不上就明说：这次定位后只能从任务栏 / X_PZ_LIST 找回列表，别让用户以为"按 Esc 没反应"。
+                try { StatusText.Text = "定位后列表会最小化，可从任务栏或 X_PZ_LIST 找回（本次 Esc 返回不可用）。"; } catch { }
+            }
+
+            // 把列表收起来再定位：不收起来会一直挡在图纸前面，
             // 用户看到的就是"点了定位，可屏幕全被列表占着、什么也看不见"。
             MinimizeForCad(() =>
             {
                 if (!AnnotationService.ZoomToAnnotation(doc, info.FirstEntityId))
                 {
+                    PluginLog.Warning("AnnotationListPanel.Locate", "缩放失败：" + info.Number);
                     RestoreFromCad();
                     Notify("定位批注 " + info.Number + " 失败。");
                 }
             });
-            // 定位完焦点在 CAD 上，用户按 Esc（结束缩放/取消选择）时把列表还原回来。
-            InstallEscReturnHook();
         }
 
         private void Mark_Click(object sender, RoutedEventArgs e)
@@ -460,7 +479,10 @@ namespace XAnnotation.Views
             }
             if (e.Key == Key.Escape && !SearchBox.IsKeyboardFocusWithin)
             {
-                Close();
+                // 定位过程中（窗口刚还原、Esc 在窗口上抬起之类）不要顺手把列表关掉：
+                // 用户想的是"回到列表"，关掉就变成"列表没了"，只能重新敲命令。
+                if (_locating) ReturnFromLocate();
+                else Close();
                 e.Handled = true;
             }
         }
@@ -487,18 +509,46 @@ namespace XAnnotation.Views
 
         // ===================== 与 CAD 的窗口配合 =====================
 
+        // 层级规则（1.0.11 用户反馈后定稿）：
+        //   · 本窗口**不是 Topmost 窗口**。以前为了"压在 CAD 之上"设了置顶，结果用户切到
+        //     Word / 微信 / 资源管理器，屏幕上也一直挂着这个列表——现场就是
+        //     "启动了批注列表后，别的软件界面都会被它盖住"。
+        //   · 现在靠"从属窗口"关系：窗口的 Win32 Owner = CAD 主框架（CadDialog.ShowModeless →
+        //     AttachToCadMainWindow），从属窗口天然压在属主之上、点 CAD 时跟着抬起来，
+        //     但**不会**盖住别的程序（切走就是切走）。导出时弹的另存为对话框也因此排在列表之上，
+        //     不需要再"临时摘置顶"（CadDialog.SuspendTopmost 对非置顶窗口是空操作）。
+        //   · 要让位给图纸时（定位 / 新建批注）仍然最小化，Esc 或重新打开时还原。
+
+        private const uint SwpNoSize = 0x0001;
+        private const uint SwpNoMove = 0x0002;
+        private const uint SwpNoActivate = 0x0010;
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+
+        /// <summary>把窗口抬到 CAD 之上（不抢焦点）。
+        /// <para>从属窗口本来就压在属主之上，这里只是兜底：从最小化 / 隐藏恢复时，
+        /// Windows 偶尔会把窗口留在属主后面，用户就会觉得"列表回来了却看不见"。</para></summary>
+        private void RaiseAboveCad()
+        {
+            try
+            {
+                var hwnd = new WindowInteropHelper(this).Handle;
+                if (hwnd == IntPtr.Zero) return;
+                SetWindowPos(hwnd, IntPtr.Zero /* HWND_TOP */, 0, 0, 0, 0, SwpNoSize | SwpNoMove | SwpNoActivate);
+            }
+            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.RaiseAboveCad", ex.Message); }
+        }
+
         /// <summary>把列表最小化，让出图纸；<paramref name="after"/> 在窗口状态落定后再执行。</summary>
         private void MinimizeForCad(Action after)
         {
             var scheduled = false;
             try
             {
-                Topmost = false;
-                _topmostSuspended = true;
                 if (WindowState != WindowState.Minimized)
                 {
                     WindowState = WindowState.Minimized;
-                    _minimizedForCad = true;
                     // 窗口最小化后 Windows 要让出前台，CAD 才会真正露出来；
                     // 等约一拍（120ms）再发命令/做缩放，动作才不会和动画打架。
                     scheduled = after != null;
@@ -518,18 +568,19 @@ namespace XAnnotation.Views
             timer.Start();
         }
 
-        /// <summary>把列表还原成置顶活动窗口（命令再次打开列表时用）。</summary>
+        /// <summary>把列表还原出来（命令再次打开列表、定位失败、按 Esc 返回都用它）。
+        /// <para><b>幂等</b>：已经正常显示时再调一次只是重新抬到 CAD 之上，不会有副作用——
+        /// 这正是"按了 Esc 一定回得来"的保证。</para></summary>
         private void RestoreFromCad()
         {
             try
             {
+                _locating = false;
                 RemoveEscReturnHook();
                 if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
                 if (!IsVisible) Show();
-                Topmost = true;
-                _topmostSuspended = false;
+                RaiseAboveCad();
                 Activate();
-                _minimizedForCad = false;
             }
             catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.RestoreFromCad", ex.Message); }
         }
@@ -613,55 +664,33 @@ namespace XAnnotation.Views
         }
 
         /// <summary>用户按 Esc 结束定位：把列表摆回来。
-        /// <para>如果用户已经自己点回列表（窗口不再是最小化），就只摘钩子、不再重摆一次。</para></summary>
+        /// <para><b>只要这一轮定位还没结束（<see cref="_locating"/>）就还原</b>，不再要求"当前确实是最小化"：
+        /// 以前那个双重条件一旦对不上（用户从任务栏点回来过、最小化被系统动作抢先），
+        /// Esc 就走进"静默摘钩子"的分支，什么都不做——这正是"按了 Esc 回不到列表"的来源。
+        /// 还原本身是幂等的，多摆一次没有副作用。</para></summary>
         private void ReturnFromLocate()
         {
-            var stillMinimized = false;
-            try { stillMinimized = _minimizedForCad && WindowState == WindowState.Minimized; }
-            catch { }
-            RemoveEscReturnHook();
-            if (!stillMinimized) return;
-            PluginLog.Info("AnnotationListPanel.EscHook", "定位后收到 Esc，还原批注列表。");
+            var locating = _locating;
+            if (!locating)
+            {
+                // 已经还原过了（例如用户先点回列表、再按 Esc）：只把钩子摘掉。
+                RemoveEscReturnHook();
+                PluginLog.Info("AnnotationListPanel.EscHook", "收到 Esc，但这一轮定位已结束，不用再还原。");
+                return;
+            }
+            PluginLog.Info("AnnotationListPanel.EscHook", "定位后收到 Esc，还原批注列表（窗口状态=" + WindowState + "）。");
             RestoreFromCad();
         }
 
         /// <summary>
         /// 把命令交给 CAD 执行（不阻塞本窗口）。
-        /// <para><b>发命令后必须让位</b>：命令执行期间可能弹"另存为/打开"对话框，也可能长时间占着界面
-        /// （Word 导出要逐条缩放截图）。以前的做法是"发命令时摘掉置顶、1.2 秒后自动恢复"——
-        /// 恢复的那一刻对话框往往正开着，列表又跳回最前把它压住，现场就是
-        /// <b>"导出 Word 回复单时，批注列表挡住保存文件的界面"</b>。</para>
-        /// <para>现在改成：摘掉置顶后<b>不再自动抢回</b>，等用户重新点回列表
-        /// （<see cref="RestoreTopmostNow"/>，挂在 Activated 上）时再置顶。</para>
+        /// <para><b>不再需要"摘置顶"</b>：列表本身不是 Topmost 窗口（见「与 CAD 的窗口配合」），
+        /// 命令里弹的另存为/打开对话框、Word 之类的外部程序都自然排在它之上，
+        /// 以前那套"发命令时摘置顶、等用户点回来再恢复"的逻辑已随置顶一起去掉。</para>
         /// </summary>
         private void RunCommand(string command)
         {
-            ReleaseTopmost();
-            if (!RunCommandDirect(command)) RestoreTopmostNow();
-        }
-
-        /// <summary>临时摘掉置顶；不自动恢复（用户点回窗口时才置顶），也不动最小化状态。</summary>
-        private void ReleaseTopmost()
-        {
-            try
-            {
-                if (!Topmost && !_topmostSuspended) return;
-                Topmost = false;
-                _topmostSuspended = true;
-            }
-            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.ReleaseTopmost", ex.Message); }
-        }
-
-        /// <summary>把置顶恢复回来（只在之前摘过的时候动，避免抢用户的窗口）。</summary>
-        private void RestoreTopmostNow()
-        {
-            try
-            {
-                if (!_topmostSuspended) return;
-                _topmostSuspended = false;
-                if (IsLoaded && WindowState != WindowState.Minimized) Topmost = true;
-            }
-            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.RestoreTopmostNow", ex.Message); }
+            RunCommandDirect(command);
         }
 
         /// <summary>直接发命令；发不出去时在界面上说清楚，不再"点了没反应"。</summary>

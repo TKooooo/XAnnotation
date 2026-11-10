@@ -27,5 +27,12 @@ namespace XAnnotation
             "1:1", "1:2", "1:5", "1:10", "1:20", "1:25", "1:30",
             "1:50", "1:75", "1:100", "1:150", "1:200", "1:300", "1:500", "1:1000"
         };
+
+        /// <summary>导出 Word 回复单时的截图底色。<b>顺序就是设置值</b>（0/1/2），
+        /// 见 <see cref="AnnotationSettings.ExportShotStyle"/> 与 WordExporter.ToInkOnWhite。</summary>
+        public static readonly string[] ExportShotStyles =
+        {
+            "白底黑字（打印稿）", "白底彩色（保留状态色）", "保持原样（CAD 黑底）"
+        };
     }
 }

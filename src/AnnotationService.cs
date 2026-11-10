@@ -2270,7 +2270,10 @@ namespace XAnnotation
             }
         }
 
-        /// <summary>扫描当前 DWG 中现有批注编号，返回最大「X-」编号+1（无批注时=1）。</summary>
+        /// <summary>扫描当前 DWG 中现有批注编号，返回最大序号+1（无批注时=1）。
+        /// <para>编号前缀可由用户配置（<see cref="AnnotationSettings.NumberPrefix"/>），这里<b>不看前缀</b>，
+        /// 一律取编号末尾的连续数字（<see cref="AnnotationNumbering.TrailingNumber"/>）：
+        /// 换了前缀以后新图从 1 开始也不会与旧编号撞号，前缀自己带数字（"A1-7"）也不会解析错。</para></summary>
         public static int GetNextNumber(Document doc)
         {
             if (doc == null || doc.IsDisposed) return 1;
@@ -2285,9 +2288,8 @@ namespace XAnnotation
                     if (!(tr.GetObject(entry.Value, OpenMode.ForRead) is Group group)) continue;
                     if (TryReadMaster(group, tr, out var data) && !string.IsNullOrWhiteSpace(data.Number))
                     {
-                        var number = data.Number.Trim();
-                        var numericPart = number.StartsWith("X-", StringComparison.OrdinalIgnoreCase) ? number.Substring(3) : number;
-                        if (int.TryParse(numericPart, out var parsed) && parsed > max) max = parsed;
+                        var parsed = AnnotationNumbering.TrailingNumber(data.Number.Trim());
+                        if (parsed > max) max = parsed;
                     }
                 }
             }

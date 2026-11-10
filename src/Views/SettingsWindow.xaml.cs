@@ -78,6 +78,7 @@ namespace XAnnotation.Views
             DefaultRoleCombo.ItemsSource = AnnotationOptions.Roles;
             ConnectorCombo.ItemsSource = new[] { "-", "_", "·", "无" };
             ScaleRatioCombo.ItemsSource = AnnotationOptions.PlotScales;
+            ExportShotStyleCombo.ItemsSource = AnnotationOptions.ExportShotStyles;
             // 所有颜色下拉菜单共享 ACI 255 色列表
             foreach (var combo in new[] { ColorIndexCombo, CloudColorCombo, LeaderColorCombo, TextColorCombo, BoxColorCombo, ReplyColorCombo, ScreenshotBackgroundColorCombo, PassColorCombo, CheckColorCombo })
                 combo.ItemsSource = AciColors.All;
@@ -108,6 +109,8 @@ namespace XAnnotation.Views
             DefaultAuthorText.Text = _s.DefaultAuthor; DefaultRoleCombo.Text = _s.DefaultRole; DefaultDisciplineText.Text = _s.DefaultDiscipline;
             FixedWidthCheck.IsChecked = _s.FixedWidth; Set(FixedWidthValueText, _s.FixedWidthValue);
             AutoNumberCheck.IsChecked = _s.AutoNumber;
+            NumberPrefixText.Text = AnnotationNumbering.NormalizePrefix(_s.NumberPrefix);
+            RefreshNumberPrefixHint();
             LayerNameText.Text = _s.LayerName; TextStyleCombo.Text = _s.TextStyleName;
             SameColorsCheck.IsChecked = _s.SameColors;
             SelectColor(ColorIndexCombo, _s.ColorIndex); SelectColor(CloudColorCombo, _s.CloudColor);
@@ -125,6 +128,7 @@ namespace XAnnotation.Views
             ShowAuthorCheck.IsChecked = _s.ShowAuthor; ShowRoleCheck.IsChecked = _s.ShowRole;
             ShowDateCheck.IsChecked = _s.ShowDate; ShowStatusCheck.IsChecked = _s.ShowStatus;
             ShowDrawingNoCheck.IsChecked = _s.ShowDrawingNo;
+            ExportShotStyleCombo.SelectedIndex = ExportShotToIndex(_s.ExportShotStyle);
         }
 
         private void Save_Click(object sender, RoutedEventArgs e)
@@ -156,6 +160,9 @@ namespace XAnnotation.Views
                 _s.DefaultDiscipline = DefaultDisciplineText.Text.Trim();
                 _s.FixedWidth = On(FixedWidthCheck); _s.FixedWidthValue = N(FixedWidthValueText, "固定宽度", 1);
                 _s.AutoNumber = On(AutoNumberCheck);
+                // 编号前缀：空值/全是非法字符时 normalize 会回落到 "X"，所以这里不必再报错；
+                // 回写的是规范化后的值，用户在设置里看到的就是实际会用的前缀。
+                _s.NumberPrefix = AnnotationNumbering.NormalizePrefix(NumberPrefixText.Text);
                 _s.LayerName = LayerNameText.Text.Trim();
                 if (_s.LayerName.Length == 0) throw new InvalidOperationException("图层名称不能为空。");
                 _s.TextStyleName = TextStyleCombo.Text.Trim();
@@ -176,6 +183,7 @@ namespace XAnnotation.Views
                 _s.ShowAuthor = On(ShowAuthorCheck); _s.ShowRole = On(ShowRoleCheck);
                 _s.ShowDate = On(ShowDateCheck); _s.ShowStatus = On(ShowStatusCheck);
                 _s.ShowDrawingNo = On(ShowDrawingNoCheck);
+                _s.ExportShotStyle = ExportShotFromIndex(ExportShotStyleCombo.SelectedIndex);
                 // 统一颜色模式：所有"分项颜色"同步为统一颜色。
                 // 注意**不要把 ReplyColor / PassColor 卷进来**：它们是"整条批注的状态色"，
                 // 不属于分项着色，被覆盖的话用户在「状态颜色」里挑的已回复/已完成颜色保存后就被冲成统一色了。
@@ -229,6 +237,23 @@ namespace XAnnotation.Views
             if (_scaleChanging || !IsInitialized) return;
             _scaleTouchedByUser = true;
             RefreshDependencies();
+        }
+
+        /// <summary>「编号前缀」输入时实时更新预览（用户能当场看到新编号长什么样）。</summary>
+        private void NumberPrefix_Changed(object sender, TextChangedEventArgs e)
+        {
+            try { RefreshNumberPrefixHint(); }
+            catch (Exception ex) { PluginLog.Warning("Settings.NumberPrefix", ex.Message); }
+        }
+
+        /// <summary>编号前缀预览：默认 X → <c>X-001</c>、<c>X-002</c>。
+        /// 填 "X-" 与填 "X" 等效（分隔符会自动补/不重复补），所以预览里两句都用 normalize 后的前缀算。</summary>
+        private void RefreshNumberPrefixHint()
+        {
+            if (NumberPrefixHint == null) return;
+            var prefix = AnnotationNumbering.NormalizePrefix(NumberPrefixText == null ? null : NumberPrefixText.Text);
+            NumberPrefixHint.Text = "编号格式：" + AnnotationNumbering.Format(prefix, 1) + "、" +
+                                    AnnotationNumbering.Format(prefix, 2) + "…（只影响之后新建的批注，已有编号不变）";
         }
 
         /// <summary>把当前比例与打印尺寸当场换算成图面尺寸显示，避免"选了比例不知道算成多大"。</summary>
@@ -320,6 +345,10 @@ namespace XAnnotation.Views
         private static string Num(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
 
         // ---- 辅助方法 ----
+        /// <summary>截图底色：设置值(0/1/2) ↔ 下拉索引（两者同序，越界一律回落默认「白底黑字」）。</summary>
+        private static int ExportShotToIndex(int style) => style >= 0 && style < AnnotationOptions.ExportShotStyles.Length ? style : 0;
+        private static int ExportShotFromIndex(int index) => index >= 0 && index < AnnotationOptions.ExportShotStyles.Length ? index : 0;
+
         private static bool On(CheckBox x) => x.IsChecked == true;
         private static void Set(TextBox x, double v) => x.Text = v.ToString("0.###", CultureInfo.InvariantCulture);
         private static double N(TextBox x, string name, double min, double max = double.MaxValue)

@@ -143,6 +143,7 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Grid.Column="0" Text="默认批注人" Style="{StaticResource FieldLabel}"/>
                             <TextBox x:Name="DefaultAuthorText" Grid.Row="0" Grid.Column="1"/>
@@ -150,8 +151,15 @@
                             <ComboBox x:Name="DefaultRoleCombo" Grid.Row="1" Grid.Column="1" IsEditable="True"/>
                             <TextBlock Grid.Row="2" Grid.Column="0" Text="默认专业" Style="{StaticResource FieldLabel}"/>
                             <TextBox x:Name="DefaultDisciplineText" Grid.Row="2" Grid.Column="1"/>
+                            <!-- 编号前缀：编号 = 前缀 + 三位序号（默认 X → X-001）。前缀可自带分隔符，"X" 与 "X-" 等效。 -->
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="编号前缀" Style="{StaticResource FieldLabel}"/>
+                            <TextBox x:Name="NumberPrefixText" Grid.Row="3" Grid.Column="1"
+                                     TextChanged="NumberPrefix_Changed"
+                                     ToolTip="新建批注的编号 = 前缀 + 三位序号（如 X → X-001）。可自带分隔符，填 X- 与填 X 等效；只影响之后新建的批注。"/>
                         </Grid>
                         <CheckBox x:Name="AutoNumberCheck" Content="自动编号" Margin="120,6,0,2"/>
+                        <TextBlock x:Name="NumberPrefixHint" Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                   Margin="120,0,0,0"/>
 
                         <Rectangle Style="{StaticResource SectionSeparator}"/>
 
@@ -165,6 +173,20 @@
                             <CheckBox x:Name="ShowDrawingNoCheck" Content="图号"/>
                             <CheckBox x:Name="ShowStatusCheck" Content="状态"/>
                         </StackPanel>
+
+                        <Rectangle Style="{StaticResource SectionSeparator}"/>
+
+                        <TextBlock Text="导出 Word 回复单" Style="{StaticResource SectionHeader}"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120"/>
+                                <ColumnDefinition Width="120"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="截图底色" Style="{StaticResource FieldLabel}"/>
+                            <ComboBox x:Name="ExportShotStyleCombo" Grid.Column="1"/>
+                        </Grid>
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0"
+                                   Text="只改导出的图片像素：不动图形、也不改 CAD 的显示设置，导出中途出错不会把界面留成白底。图为白色底（布局）时自动不做转换。"/>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>

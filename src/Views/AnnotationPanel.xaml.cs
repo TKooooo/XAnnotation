@@ -2048,7 +2048,8 @@ namespace XAnnotation.Views
             if (settings.AutoNumber)
             {
                 settings.NextNumber = AnnotationService.GetNextNumber(doc);
-                data.Number = "X-" + settings.NextNumber.ToString("D3");
+                // 编号 = 「设置 → 编号前缀」+ 三位序号（默认 X → X-001），见 AnnotationNumbering。
+                data.Number = AnnotationNumbering.Format(AnnotationNumbering.ResolvePrefix(settings), settings.NextNumber);
             }
 
             return data;

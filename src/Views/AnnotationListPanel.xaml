@@ -5,7 +5,7 @@
         Title="批注列表" Width="1060" Height="700"
         MinWidth="820" MinHeight="540"
         ResizeMode="CanResize"
-        Topmost="True" ShowInTaskbar="True"
+        ShowInTaskbar="True"
         WindowStyle="ToolWindow"
         WindowStartupLocation="CenterScreen"
         FontFamily="Microsoft YaHei UI" FontSize="12"
@@ -20,6 +20,8 @@
       数据全部由 AnnotationListPanel.xaml.cs 填充；本文件不含任何业务逻辑。
 
       改这里的注意事项：
+      - 本窗口**不是置顶窗口**（没有 Topmost）：它作为 CAD 主窗口的"从属窗口"压在 CAD 之上，
+        但不会盖住别的程序。别为了"总能看见"再加回 Topmost="True"，那样切到 Word/微信 也会被挡住。
       - 列宽：序号52 编号76 专业78 图号100 摘要(动态) 批注人76 时间106 状态100。
         「意见摘要」是唯一弹性列，宽度由 ResizeSummaryColumn() 按窗口宽度算，
         改上面任何一个固定宽度必须同步改 code-behind 里的 FixedColumnsWidth。

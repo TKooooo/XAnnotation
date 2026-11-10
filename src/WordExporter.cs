@@ -68,6 +68,12 @@ namespace XAnnotation
             ViewTableRecord originalView = null;
             using (var view = ed.GetCurrentView()) originalView = (ViewTableRecord)view.Clone();
 
+            // 截图底色（设置 → 导出 Word 回复单 → 截图底色）：0=白底黑字（默认）、1=白底彩色、2=保持原样。
+            // 只做像素转换，不改 CAD 显示设置，所以导出中断也不会把用户的界面留成白底。
+            var shotStyle = 0;
+            try { shotStyle = SettingsStore.Load().ExportShotStyle; }
+            catch (System.Exception ex) { PluginLog.Warning("WordExport.Settings", ex.Message); }
+
             var imagesPerEntry = new List<List<byte[]>>();
             try
             {
@@ -81,7 +87,7 @@ namespace XAnnotation
                         try
                         {
                             ZoomToExtents(doc, extents);
-                            var png = CaptureWindowPng(doc);
+                            var png = CaptureWindowPng(doc, shotStyle);
                             if (png != null && png.Length > 0) images.Add(png);
                         }
                         catch (System.Exception ex) { PluginLog.Error("WordExport.Capture", ex); }
@@ -139,7 +145,7 @@ namespace XAnnotation
         /// 主路径使用 CAD 自带的 CapturePreviewImage，仅读取当前视图渲染结果；
         /// 后备路径也只请求 CAD 文档窗口自身重绘。两者都不允许抓取桌面像素，防止输入法或其他程序混入 Word。
         /// </summary>
-        private static byte[] CaptureWindowPng(Document doc)
+        private static byte[] CaptureWindowPng(Document doc, int shotStyle)
         {
             var hwnd = doc.Window.Handle;
             if (hwnd == IntPtr.Zero) return null;
@@ -155,8 +161,11 @@ namespace XAnnotation
                 using (var bitmap = CaptureCadView(doc, hwnd, width, height))
                 {
                     if (bitmap == null) return null;
+                    // 纯色判断用原始截图做（转换后背景一定是白的，会把"没渲染出来"掩盖掉）。
                     var nearlyUniform = LooksNearlyUniform(bitmap);
-                    using (var scaled = Downscale(bitmap, 1600))
+                    // shotStyle：0=白底黑字、1=白底彩色、2=保持原样
+                    using (var styled = shotStyle == 2 ? new Bitmap(bitmap) : ToInkOnWhite(bitmap, shotStyle == 1))
+                    using (var scaled = Downscale(styled, 1600))
                     using (var stream = new MemoryStream())
                     {
                         scaled.Save(stream, ImageFormat.Png);
@@ -168,6 +177,151 @@ namespace XAnnotation
                     PluginLog.Warning("WordExport.Capture", $"第 {attempt + 1} 次截图接近纯色，等待 CAD 完成渲染后重试。");
             }
             return lastCapture;
+        }
+
+        /// <summary>墨迹亮度目标：把墨色压到这么亮（0=纯黑）。60 在纸上就是"黑字"，又不会糊成一团。</summary>
+        private const int InkLuminance = 60;
+
+        /// <summary>把 CAD 视图截图（黑底彩线）转成<b>白底黑字</b>的打印稿观感。
+        /// <para><b>为什么用像素转换、而不是临时把 CAD 背景改成白色</b>：
+        /// 改背景等于改用户当前会话的显示设置（导出中途出错就会留在白底），而且只有 7 号色会随背景
+        /// 自动变黑，其它颜色（黄/青）在白底上反而更看不清；像素转换不动图形、不动设置，
+        /// AutoCAD / 中望 / 浩辰走同一套代码，渐变底、深灰底也不会漏。</para>
+        /// <para><b>算法</b>：把"与背景色的差异"当作<b>墨量</b> <c>a</c>（0 = 纯背景），背景铺白、
+        /// 墨迹按同比例压深：<c>输出 = 白 × (1-a) + 墨色 × a</c>。抗锯齿边缘因为 a 小，自然变成浅灰——
+        /// 和真正打印出来的观感一致。</para>
+        /// <para><paramref name="keepColor"/>=true（白底彩色）：墨色保留原色相、只压亮度，
+        /// 已回复/已完成那种整条着色仍分得出；=false（白底黑字，默认）：墨色统一成黑，
+        /// 就是黑白打印稿的效果。</para>
+        /// <para>背景本身就是白/浅色（布局、纸质配色的图）时<b>原样返回</b>，不做二次加工，
+        /// 免得把本来就是白底的截图又"翻"一遍。</para></summary>
+        private static Bitmap ToInkOnWhite(Bitmap source, bool keepColor)
+        {
+            if (source == null) return null;
+            var width = source.Width;
+            var height = source.Height;
+            if (width <= 0 || height <= 0) return new Bitmap(source);
+
+            var target = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            using (var graphics = Graphics.FromImage(target))
+            {
+                // 统一成 24bpp：CapturePreviewImage 回来可能是 32bpp，直接 LockBits 换格式会失败。
+                graphics.DrawImage(source, 0, 0, width, height);
+            }
+
+            var rect = new Rectangle(0, 0, width, height);
+            BitmapData data = null;
+            try
+            {
+                data = target.LockBits(rect, ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
+                var stride = data.Stride;
+                var bytes = Math.Abs(stride) * height;
+                var buffer = new byte[bytes];
+                Marshal.Copy(data.Scan0, buffer, 0, bytes);
+
+                // 背景色 = 四条边上出现最多的颜色。CAD 视图底色是整片纯色，按边统计比取角落稳
+                // （左上角可能压着坐标轴图标）。
+                var background = DetectBackground(buffer, stride, width, height);
+                var bgLum = (299 * background.R + 587 * background.G + 114 * background.B) / 1000;
+                if (bgLum > 128) return target;   // 已经是浅底，不用转换
+
+                for (var y = 0; y < height; y++)
+                {
+                    var row = stride > 0 ? y * stride : (height - 1 - y) * (-stride);
+                    for (var x = 0; x < width; x++)
+                    {
+                        var index = row + x * 3;
+                        int b = buffer[index], g = buffer[index + 1], r = buffer[index + 2];
+
+                        // 墨量：与背景的最大通道差（黑底时就是这条线有多亮）。
+                        var ink = Math.Max(Math.Abs(r - background.R),
+                                  Math.Max(Math.Abs(g - background.G), Math.Abs(b - background.B)));
+                        if (ink <= 8)
+                        {
+                            buffer[index] = 255; buffer[index + 1] = 255; buffer[index + 2] = 255;
+                            continue;
+                        }
+
+                        byte outR, outG, outB;
+                        if (!keepColor)
+                        {
+                            // 白底黑字：墨色统一为黑，墨量直接变灰度 → 白纸上就是从黑到浅灰的黑白打印效果。
+                            var level = (byte)(255 - ink);
+                            outR = outG = outB = level;
+                        }
+                        else
+                        {
+                            // 白底彩色：墨色保留色相，只把亮度压到目标值（已经比目标更暗的不做反相）。
+                            var lum = (299 * r + 587 * g + 114 * b) / 1000;
+                            var scale = lum > InkLuminance ? (double)InkLuminance / lum : 1.0;
+                            var inkR = (int)(r * scale);
+                            var inkG = (int)(g * scale);
+                            var inkB = (int)(b * scale);
+                            // out = 255 × (1 - ink/255) + inkColor × ink/255
+                            outR = (byte)(255 - ink * (255 - inkR) / 255);
+                            outG = (byte)(255 - ink * (255 - inkG) / 255);
+                            outB = (byte)(255 - ink * (255 - inkB) / 255);
+                        }
+
+                        buffer[index] = outB;
+                        buffer[index + 1] = outG;
+                        buffer[index + 2] = outR;
+                    }
+                }
+
+                Marshal.Copy(buffer, 0, data.Scan0, bytes);
+            }
+            catch (System.Exception ex)
+            {
+                PluginLog.Warning("WordExport.InkOnWhite", "白底转换失败，仍按原截图导出：" + ex.Message);
+                if (data != null) { try { target.UnlockBits(data); } catch { } data = null; }
+                try { target.Dispose(); } catch { }
+                return new Bitmap(source);
+            }
+            finally
+            {
+                if (data != null)
+                {
+                    try { target.UnlockBits(data); } catch { }
+                }
+            }
+            return target;
+        }
+
+        /// <summary>统计四条边上出现最多的颜色（CAD 视图底色是一片纯色，这样取最稳）。</summary>
+        private static Color DetectBackground(byte[] buffer, int stride, int width, int height)
+        {
+            var counts = new Dictionary<int, int>();
+            var step = Math.Max(1, width / 200);
+            for (var x = 0; x < width; x += step)
+            {
+                AddColor(counts, buffer, stride, height, x, 0);
+                AddColor(counts, buffer, stride, height, x, height - 1);
+            }
+            for (var y = 0; y < height; y += step)
+            {
+                AddColor(counts, buffer, stride, height, 0, y);
+                AddColor(counts, buffer, stride, height, width - 1, y);
+            }
+
+            var best = 0; var bestCount = -1;
+            foreach (var pair in counts)
+            {
+                if (pair.Value > bestCount) { best = pair.Key; bestCount = pair.Value; }
+            }
+            // 一个像素都没统计到（宽高异常）：按黑底处理。
+            return bestCount <= 0 ? Color.FromArgb(0, 0, 0)
+                 : Color.FromArgb((best >> 16) & 0xFF, (best >> 8) & 0xFF, best & 0xFF);
+        }
+
+        private static void AddColor(Dictionary<int, int> counts, byte[] buffer, int stride, int height, int x, int y)
+        {
+            if (x < 0 || y < 0) return;
+            var offset = (stride > 0 ? y * stride : (height - 1 - y) * (-stride)) + x * 3;
+            if (offset < 0 || offset + 2 >= buffer.Length) return;
+            var key = (buffer[offset + 2] << 16) | (buffer[offset + 1] << 8) | buffer[offset];
+            counts.TryGetValue(key, out var count);
+            counts[key] = count + 1;
         }
 
         private static Bitmap CaptureCadView(Document doc, IntPtr hwnd, int width, int height)
