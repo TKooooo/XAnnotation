@@ -5,7 +5,7 @@
         Title="批注清单" Width="1060" Height="700"
         MinWidth="820" MinHeight="540"
         ResizeMode="CanResize"
-        Topmost="True" ShowInTaskbar="False"
+        Topmost="True" ShowInTaskbar="True"
         WindowStyle="ToolWindow"
         WindowStartupLocation="CenterScreen"
         FontFamily="Microsoft YaHei UI" FontSize="12"
@@ -20,7 +20,7 @@
       数据全部由 AnnotationListPanel.xaml.cs 填充；本文件不含任何业务逻辑。
 
       改这里的注意事项：
-      - 列宽：序号52 编号76 专业78 图号100 摘要(动态) 批注人76 时间106 状态88。
+      - 列宽：序号52 编号76 专业78 图号100 摘要(动态) 批注人76 时间106 状态100。
         「意见摘要」是唯一弹性列，宽度由 ResizeSummaryColumn() 按窗口宽度算，
         改上面任何一个固定宽度必须同步改 code-behind 里的 FixedColumnsWidth。
       - 行模板用 GridViewRowPresenter，单元格的内边距统一由 CellText 样式的 Margin 给（12），
@@ -357,7 +357,7 @@
                                 </DataTemplate>
                             </GridViewColumn.CellTemplate>
                         </GridViewColumn>
-                        <GridViewColumn Header="状态" Width="88" CellTemplate="{StaticResource StatusCell}"/>
+                        <GridViewColumn Header="状态" Width="100" CellTemplate="{StaticResource StatusCell}"/>
                     </GridView>
                 </ListView.View>
             </ListView>
@@ -430,16 +430,28 @@
 
         <!-- ═════════ 底部统计与操作 ═════════ -->
         <Grid Grid.Row="3" Margin="2,10,2,0">
-            <TextBlock x:Name="FooterStats" Text="共 0 条" FontSize="11" VerticalAlignment="Center"
-                       Foreground="{StaticResource TextSecondaryBrush}"/>
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <StackPanel VerticalAlignment="Center">
+                <TextBlock x:Name="FooterStats" Text="共 0 条" FontSize="11"
+                           Foreground="{StaticResource TextSecondaryBrush}"/>
+                <!-- 操作结果回显：改状态成功/失败、命令发没发出去都写在这儿，不再"点了没反应" -->
+                <TextBlock x:Name="StatusText" Text="" FontSize="11" Margin="0,2,0,0"
+                           Foreground="{StaticResource PrimaryBrush}" TextTrimming="CharacterEllipsis"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                 <Button Content="定位到图纸" Style="{DynamicResource SecondaryButton}" Height="32" MinWidth="88"
-                        Padding="12,0" Margin="0" Click="Locate_Click"/>
-                <Button Content="标记状态" Style="{DynamicResource PrimaryButton}" Height="32" MinWidth="88"
+                        Padding="12,0" Margin="0" Click="Locate_Click"
+                        ToolTip="缩放到选中的批注，并把清单最小化让出图纸"/>
+                <Button Style="{DynamicResource PrimaryButton}" Height="32" MinWidth="96"
                         Padding="14,0" Margin="8,0,0,0" Click="Mark_Click"
                         ToolTip="把选中的批注标记为待处理 / 已回复 / 已完成">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="标记状态" VerticalAlignment="Center"/>
+                        <!-- 下三角用 Path 画：字体里的 ▾ 在 12px 下会糊成一个小点 -->
+                        <Path Data="M0,0 L9,0 L4.5,6 Z" Margin="7,2,0,0" VerticalAlignment="Center"
+                              Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                    </StackPanel>
                     <Button.ContextMenu>
-                        <ContextMenu FontSize="12">
+                        <ContextMenu FontSize="12" Placement="Top">
                             <MenuItem Header="待处理" Click="MarkPending_Click"/>
                             <MenuItem Header="已回复" Click="MarkReplied_Click"/>
                             <MenuItem Header="已完成" Click="MarkDone_Click"/>

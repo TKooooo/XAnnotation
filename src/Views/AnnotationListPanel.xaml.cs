@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Threading;
 #if ZWCAD
@@ -24,17 +26,24 @@ namespace XAnnotation.Views
 {
     /// <summary>批注清单：表格 + 状态筛选 + 搜索 + 详情，双击行在图纸中定位。
     /// <para>数据源统一走 <see cref="AnnotationService.GetAllAnnotations"/>（与 CSV/Word 导出同源），
-    /// 本窗口只做筛选、展示与转发命令，不改图纸内容。</para></summary>
+    /// 本窗口只做筛选、展示与转发命令，不改图纸内容。</para>
+    /// <para><b>所有事件处理器都必须走 <see cref="Safe"/> 包一层</b>：宿主 AutoCAD 2014 里没有 WPF
+    /// <c>Application</c> 对象（见 <see cref="WpfGuard"/> 的说明），任何漏出去的异常都会让 CAD 直接
+    /// "致命错误"退出。以前筛选胶囊一点就崩，就是异常没人接。</para></summary>
     internal partial class AnnotationListPanel : Window
     {
         private static AnnotationListPanel _instance;
 
         /// <summary>表格里除"意见摘要"之外的固定列宽之和（见 XAML 顶部注释）。
         /// 摘要列宽 = 列表实际宽度 - 这个值 - 滚动条余量。</summary>
-        private const double FixedColumnsWidth = 52 + 76 + 78 + 100 + 76 + 106 + 88;
+        private const double FixedColumnsWidth = 52 + 76 + 78 + 100 + 76 + 106 + 100;
 
         /// <summary>全量批注（未筛选）。每次刷新整体重建，列表项是不可变快照。</summary>
         private List<AnnotationService.AnnotationInfo> _all = new List<AnnotationService.AnnotationInfo>();
+
+        /// <summary>列表的数据视图。筛选只改它的 Filter 再 Refresh，<b>不再整体替换 ItemsSource</b>：
+        /// 换数据源会把选中行、滚动位置、单元格生成一次性全推倒，是"点筛选就出错"的高风险来源。</summary>
+        private ICollectionView _view;
 
         /// <summary>当前状态筛选；空串 = 全部。</summary>
         private string _statusFilter = "";
@@ -45,16 +54,24 @@ namespace XAnnotation.Views
         /// <summary>"意见摘要"这一列（唯一弹性列），窗口尺寸变化时重算宽度。</summary>
         private GridViewColumn _summaryColumn;
 
+        /// <summary>把窗口交给 CAD（最小化）之后，用户是否还要看清单——重新打开时用来决定是否还原。</summary>
+        private bool _minimizedForCad;
+
         private AnnotationListPanel()
         {
+            WpfGuard.Install();
             WpfHost.Ensure();
             InitializeComponent();
             CadDialog.RegisterFloating(this);
 
             Loaded += OnPanelLoaded;
-            SizeChanged += (_, __) => ResizeSummaryColumn();
-            PreviewKeyDown += OnPreviewKeyDown;
-            Closing += (_, __) => _instance = null;
+            SizeChanged += (_, __) => SafeRun("Resize", ResizeSummaryColumn);
+            PreviewKeyDown += (s, e) => SafeRun("KeyDown", () => OnPreviewKeyDown(s, e));
+            Closing += (_, __) =>
+            {
+                _instance = null;
+                _minimizedForCad = false;
+            };
         }
 
         /// <summary>显示或激活批注清单（单例），并刷新数据。</summary>
@@ -62,7 +79,7 @@ namespace XAnnotation.Views
         {
             if (_instance != null && _instance.IsLoaded)
             {
-                _instance.Activate();
+                _instance.RestoreFromCad();
                 _instance.LoadAnnotations();
                 return;
             }
@@ -75,12 +92,13 @@ namespace XAnnotation.Views
         /// <summary>若清单已打开则刷新数据。</summary>
         public static void RefreshIfOpen()
         {
-            if (_instance != null && _instance.IsLoaded) _instance.LoadAnnotations();
+            if (_instance != null && _instance.IsLoaded)
+                _instance.SafeRun("Refresh", _instance.LoadAnnotations);
         }
 
         private void OnPanelLoaded(object sender, RoutedEventArgs e)
         {
-            try
+            SafeRun("Loaded", () =>
             {
                 // 小屏幕（1366×768）上 700 高的窗口会压到任务栏，按工作区夹一次。
                 var work = SystemParameters.WorkArea;
@@ -88,12 +106,11 @@ namespace XAnnotation.Views
                 MaxHeight = Math.Max(540, work.Height - 40);
                 if (Width > MaxWidth) Width = MaxWidth;
                 if (Height > MaxHeight) Height = MaxHeight;
-            }
-            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.OnPanelLoaded", ex.Message); }
 
-            _summaryColumn = ResolveSummaryColumn();
-            ResizeSummaryColumn();
-            LoadAnnotations();
+                _summaryColumn = ResolveSummaryColumn();
+                ResizeSummaryColumn();
+                LoadAnnotations();
+            });
         }
 
         private GridViewColumn ResolveSummaryColumn()
@@ -121,34 +138,51 @@ namespace XAnnotation.Views
             if (doc == null)
             {
                 _all = new List<AnnotationService.AnnotationInfo>();
-                ApplyFilter();
+                BindView();
                 DetailContent.Text = "当前没有打开的图纸。";
                 return;
             }
             _all = AnnotationService.GetAllAnnotations(doc);
-            ApplyFilter();
+            BindView();
         }
 
-        /// <summary>按状态筛选 + 关键字过滤后刷新表格，并尽量保住原来的选中行。</summary>
-        private void ApplyFilter()
+        /// <summary>把全量数据挂到表格上（只在刷新/首次加载时做，筛选不碰它）。</summary>
+        private void BindView()
         {
-            var keepId = (AnnotationList.SelectedItem as AnnotationService.AnnotationInfo)?.Id;
+            _view = CollectionViewSource.GetDefaultView(_all);
+            _view.Filter = FilterPredicate;
+            AnnotationList.ItemsSource = _view;
+            RefreshView();
+        }
 
-            IEnumerable<AnnotationService.AnnotationInfo> query = _all;
-            if (!string.IsNullOrEmpty(_statusFilter)) query = query.Where(item => item.IsStatus(_statusFilter));
+        private bool FilterPredicate(object item)
+        {
+            var info = item as AnnotationService.AnnotationInfo;
+            if (info == null) return false;
+            if (!string.IsNullOrEmpty(_statusFilter) && !info.IsStatus(_statusFilter)) return false;
             var keyword = (_keyword ?? "").Trim();
-            if (keyword.Length > 0) query = query.Where(item => Matches(item, keyword));
+            if (keyword.Length > 0 && !Matches(info, keyword)) return false;
+            return true;
+        }
 
-            var list = query.ToList();
-            AnnotationList.ItemsSource = list;
+        /// <summary>按当前状态筛选 + 关键字重排列表，并尽量保住原来的选中行。</summary>
+        private void RefreshView()
+        {
+            if (_view == null) return;
+            var keepId = SelectedInfo?.Id;
+
+            _view.Filter = FilterPredicate;
+            _view.Refresh();
+
+            var visible = _view.Cast<AnnotationService.AnnotationInfo>().ToList();
 
             AnnotationService.AnnotationInfo keep = null;
-            if (!string.IsNullOrEmpty(keepId)) keep = list.FirstOrDefault(item => item.Id == keepId);
-            if (keep == null && list.Count > 0) keep = list[0];
+            if (!string.IsNullOrEmpty(keepId)) keep = visible.FirstOrDefault(item => item.Id == keepId);
+            if (keep == null && visible.Count > 0) keep = visible[0];
             AnnotationList.SelectedItem = keep;
 
             UpdateCounters();
-            if (keep == null) ShowDetail(null, list.Count == 0 && _all.Count > 0);
+            if (keep == null) ShowDetail(null, visible.Count == 0 && _all.Count > 0);
         }
 
         private static bool Matches(AnnotationService.AnnotationInfo info, string keyword)
@@ -232,32 +266,41 @@ namespace XAnnotation.Views
 
         private void List_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            ShowDetail(AnnotationList.SelectedItem as AnnotationService.AnnotationInfo, false);
+            SafeRun("SelectionChanged", () => ShowDetail(SelectedInfo, false));
         }
 
         private void FilterChip_Checked(object sender, RoutedEventArgs e)
         {
-            var chip = sender as RadioButton;
-            // 初始化阶段控件还没建全，Tag 可能读不到：此时按"全部"处理，真正加载后 ApplyFilter 会再算一遍。
-            _statusFilter = chip == null ? "" : (chip.Tag as string ?? "");
-            if (!IsLoaded) return;
-            ApplyFilter();
+            SafeRun("FilterChip", () =>
+            {
+                var chip = sender as RadioButton;
+                // 初始化阶段控件还没建全，Tag 可能读不到：此时按"全部"处理，真正加载后 RefreshView 会再算一遍。
+                _statusFilter = chip == null ? "" : (chip.Tag as string ?? "");
+                if (!IsLoaded) return;
+                RefreshView();
+            });
         }
 
         private void Search_TextChanged(object sender, TextChangedEventArgs e)
         {
-            _keyword = SearchBox.Text ?? "";
-            if (!IsLoaded) return;
-            ApplyFilter();
+            SafeRun("Search", () =>
+            {
+                _keyword = SearchBox.Text ?? "";
+                if (!IsLoaded) return;
+                RefreshView();
+            });
         }
 
         /// <summary>双击行：缩放到对应批注并高亮选中。</summary>
         private void List_DoubleClick(object sender, MouseButtonEventArgs e)
         {
-            var info = ResolveClickedInfo(e.OriginalSource as DependencyObject)
-                ?? AnnotationList.SelectedItem as AnnotationService.AnnotationInfo;
-            if (info == null) return;
-            Locate(info);
+            SafeRun("DoubleClick", () =>
+            {
+                var info = ResolveClickedInfo(e.OriginalSource as DependencyObject)
+                    ?? SelectedInfo;
+                if (info == null) return;
+                Locate(info);
+            });
         }
 
         /// <summary>从双击命中的可视化树向上找到对应的列表项数据。</summary>
@@ -271,7 +314,7 @@ namespace XAnnotation.Views
             return null;
         }
 
-        private void Locate_Click(object sender, RoutedEventArgs e) => Locate(SelectedInfo);
+        private void Locate_Click(object sender, RoutedEventArgs e) => SafeRun("Locate", () => Locate(SelectedInfo));
 
         private void Locate(AnnotationService.AnnotationInfo info)
         {
@@ -283,21 +326,31 @@ namespace XAnnotation.Views
                 Notify("定位失败：批注实体已不存在，请刷新列表。");
                 return;
             }
-            if (!AnnotationService.ZoomToAnnotation(doc, info.FirstEntityId))
+
+            // 先把清单收起来再定位：清单是置顶窗口，不收起来会一直挡在图纸前面，
+            // 用户看到的就是"点了定位，可屏幕全被清单占着、什么也看不见"。
+            MinimizeForCad(() =>
             {
-                Notify("定位批注 " + info.Number + " 失败。");
-            }
+                if (!AnnotationService.ZoomToAnnotation(doc, info.FirstEntityId))
+                {
+                    RestoreFromCad();
+                    Notify("定位批注 " + info.Number + " 失败。");
+                }
+            });
         }
 
         private void Mark_Click(object sender, RoutedEventArgs e)
         {
-            if (SelectedInfo == null) { Notify("请先在列表里选中一条批注。"); return; }
-            OpenMenu(sender);
+            SafeRun("Mark", () =>
+            {
+                if (SelectedInfo == null) { Notify("请先在列表里选中一条批注。"); return; }
+                if (!OpenMenu(sender)) Notify("状态菜单没有打开，请用鼠标右键点击这一行。");
+            });
         }
 
-        private void MarkPending_Click(object sender, RoutedEventArgs e) => ApplyStatus("待处理");
-        private void MarkReplied_Click(object sender, RoutedEventArgs e) => ApplyStatus("已回复");
-        private void MarkDone_Click(object sender, RoutedEventArgs e) => ApplyStatus("已完成");
+        private void MarkPending_Click(object sender, RoutedEventArgs e) => SafeRun("MarkPending", () => ApplyStatus("待处理"));
+        private void MarkReplied_Click(object sender, RoutedEventArgs e) => SafeRun("MarkReplied", () => ApplyStatus("已回复"));
+        private void MarkDone_Click(object sender, RoutedEventArgs e) => SafeRun("MarkDone", () => ApplyStatus("已完成"));
 
         private void ApplyStatus(string status)
         {
@@ -307,33 +360,47 @@ namespace XAnnotation.Views
             if (doc == null) { Notify("当前没有打开的图纸。"); return; }
             if (string.Equals(info.Status, status, StringComparison.Ordinal)) return;
 
-            var changed = AnnotationService.SetStatus(doc, info.FirstEntityId, status);
-            if (!changed)
+            if (info.FirstEntityId.IsNull || !info.FirstEntityId.IsValid || info.FirstEntityId.IsErased)
             {
-                Notify("改状态失败：批注实体可能已不存在，请刷新列表。");
+                Notify("改状态失败：批注实体已不存在，请按 F5 刷新列表。");
                 return;
             }
-            doc.Editor.WriteMessage("\nX-批注 " + info.Number + " 已标记为「" + status + "」。");
+
+            var reason = AnnotationService.SetStatus(doc, info.FirstEntityId, status, out var changed);
+            if (!changed)
+            {
+                Notify("改状态失败" + (string.IsNullOrEmpty(reason) ? "。" : "：" + reason) + "\n可按 F5 刷新列表后重试。");
+                return;
+            }
+
+            try { doc.Editor.WriteMessage("\nX-批注 " + info.Number + " 已标记为「" + status + "」。"); }
+            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.WriteMessage", ex.Message); }
+
             LoadAnnotations();
+            StatusText.Text = "已把 " + info.Number + " 标记为「" + status + "」";
         }
 
-        private void NewAnnotation_Click(object sender, RoutedEventArgs e) => RunCommand("X_PZ_DRAW");
+        private void NewAnnotation_Click(object sender, RoutedEventArgs e) => SafeRun("NewAnnotation", () =>
+        {
+            // 同上：清单挡在图纸前面时连"指定第一个角点"都点不到，先收起来再发绘制命令。
+            MinimizeForCad(() => RunCommandDirect("X_PZ_DRAW"));
+        });
 
-        private void Export_Click(object sender, RoutedEventArgs e)
+        private void Export_Click(object sender, RoutedEventArgs e) => SafeRun("Export", () =>
         {
             if (OpenMenu(sender)) return;
             RunCommand("X_PZ_EXPORT");
-        }
+        });
 
-        private void ExportCsv_Click(object sender, RoutedEventArgs e) => RunCommand("X_PZ_EXPORT");
+        private void ExportCsv_Click(object sender, RoutedEventArgs e) => SafeRun("ExportCsv", () => RunCommand("X_PZ_EXPORT"));
 
-        private void ExportWord_Click(object sender, RoutedEventArgs e) => RunCommand("X_PZ_WORD");
+        private void ExportWord_Click(object sender, RoutedEventArgs e) => SafeRun("ExportWord", () => RunCommand("X_PZ_WORD"));
 
-        private void Refresh_Click(object sender, RoutedEventArgs e) => LoadAnnotations();
+        private void Refresh_Click(object sender, RoutedEventArgs e) => SafeRun("Reload", LoadAnnotations);
 
-        private void Close_Click(object sender, RoutedEventArgs e) => Close();
+        private void Close_Click(object sender, RoutedEventArgs e) => SafeRun("Close", Close);
 
-        private void Delete_Click(object sender, RoutedEventArgs e)
+        private void Delete_Click(object sender, RoutedEventArgs e) => SafeRun("Delete", () =>
         {
             var info = SelectedInfo;
             if (info == null) { Notify("请先在列表里选中一条批注。"); return; }
@@ -357,7 +424,7 @@ namespace XAnnotation.Views
                 Notify("删除批注失败: " + ex.Message);
             }
             LoadAnnotations();
-        }
+        });
 
         private void OnPreviewKeyDown(object sender, KeyEventArgs e)
         {
@@ -393,9 +460,59 @@ namespace XAnnotation.Views
             var button = sender as Button;
             if (button == null || button.ContextMenu == null) return false;
             button.ContextMenu.PlacementTarget = button;
-            button.ContextMenu.Placement = PlacementMode.Bottom;
+            // 菜单朝上弹：「标记状态」按钮在窗口最底行，往下弹会跑到屏幕外，
+            // 以前点了没反应就是这个原因（菜单其实开了，只是看不见）。
+            button.ContextMenu.Placement = PlacementMode.Top;
+            button.ContextMenu.HorizontalOffset = 0;
+            button.ContextMenu.VerticalOffset = -2;
             button.ContextMenu.IsOpen = true;
             return true;
+        }
+
+        // ===================== 与 CAD 的窗口配合 =====================
+
+        /// <summary>把清单最小化，让出图纸；<paramref name="after"/> 在窗口状态落定后再执行。</summary>
+        private void MinimizeForCad(Action after)
+        {
+            var scheduled = false;
+            try
+            {
+                Topmost = false;
+                if (WindowState != WindowState.Minimized)
+                {
+                    WindowState = WindowState.Minimized;
+                    _minimizedForCad = true;
+                    // 窗口最小化后 Windows 要让出前台，CAD 才会真正露出来；
+                    // 等约一拍（120ms）再发命令/做缩放，动作才不会和动画打架。
+                    scheduled = after != null;
+                }
+            }
+            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.MinimizeForCad", ex.Message); }
+
+            if (after == null) return;
+            if (!scheduled) { SafeRun("AfterMinimize", after); return; }
+
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
+            timer.Tick += (s, e) =>
+            {
+                timer.Stop();
+                SafeRun("AfterMinimize", after);
+            };
+            timer.Start();
+        }
+
+        /// <summary>把清单还原成置顶活动窗口（命令再次打开清单时用）。</summary>
+        private void RestoreFromCad()
+        {
+            try
+            {
+                if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+                if (!IsVisible) Show();
+                Topmost = true;
+                Activate();
+                _minimizedForCad = false;
+            }
+            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.RestoreFromCad", ex.Message); }
         }
 
         /// <summary>
@@ -405,33 +522,94 @@ namespace XAnnotation.Views
         /// </summary>
         private void RunCommand(string command)
         {
-            var doc = CadApplication.DocumentManager.MdiActiveDocument;
-            if (doc == null) { Notify("当前没有打开的图纸。"); return; }
-
             var wasTopmost = Topmost;
             Topmost = false;
-            try { doc.SendStringToExecute(command + " ", true, false, false); }
-            catch (Exception ex)
-            {
-                PluginLog.Error("AnnotationListPanel.RunCommand", ex);
-                Notify("执行 " + command + " 失败: " + ex.Message);
-                if (wasTopmost) Topmost = true;
-                return;
-            }
+            if (!RunCommandDirect(command)) { if (wasTopmost) Topmost = true; return; }
 
             if (!wasTopmost) return;
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
             timer.Tick += (s, args) =>
             {
                 timer.Stop();
-                try { if (IsLoaded) Topmost = true; } catch { }
+                try { if (IsLoaded && WindowState != WindowState.Minimized) Topmost = true; } catch { }
             };
             timer.Start();
         }
 
+        /// <summary>直接发命令；发不出去时在界面上说清楚，不再"点了没反应"。</summary>
+        private bool RunCommandDirect(string command)
+        {
+            try
+            {
+                var doc = CadApplication.DocumentManager.MdiActiveDocument;
+                if (doc == null) { Notify("当前没有打开的图纸。"); return false; }
+                doc.SendStringToExecute(command + " ", true, false, false);
+                PluginLog.Info("AnnotationListPanel.RunCommand", "已发送命令 " + command);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Error("AnnotationListPanel.RunCommand", ex);
+                Notify("执行 " + command + " 失败: " + ex.Message);
+                return false;
+            }
+        }
+
         private void Notify(string message)
         {
-            MessageBox.Show(this, message, "批注清单", MessageBoxButton.OK, MessageBoxImage.Information);
+            try { MessageBox.Show(this, message, "批注清单", MessageBoxButton.OK, MessageBoxImage.Information); }
+            catch (Exception ex) { PluginLog.Warning("AnnotationListPanel.Notify", ex.Message); }
+        }
+
+        // ===================== 异常防护 =====================
+
+        /// <summary>跑一段界面逻辑；任何异常都记日志并吞掉，绝不让它冒到 CAD 里变成"致命错误"。</summary>
+        private void SafeRun(string area, Action action)
+        {
+            try { action(); }
+            catch (Exception ex)
+            {
+                PluginLog.Error("AnnotationListPanel." + area, ex);
+                try
+                {
+                    if (StatusText != null) StatusText.Text = "操作失败（已记录日志）：" + ex.Message;
+                    var doc = CadApplication.DocumentManager.MdiActiveDocument;
+                    if (doc != null) doc.Editor.WriteMessage("\nX-批注清单出错（已记录日志）：" + ex.Message);
+                }
+                catch { }
+            }
+        }
+    }
+
+    /// <summary>WPF 界面线程的兜底：把漏出来的异常记日志并吃掉，避免宿主 CAD 直接致命错误退出。
+    /// <para><b>为什么必须有</b>：AutoCAD 2014 进程里<b>没有</b> WPF <c>Application</c> 对象
+    /// （启动日志里的"宿主进程无 WPF Application"就是这个意思），于是 WPF 没有可挂
+    /// <c>DispatcherUnhandledException</c> 的地方——任何 UI 线程异常都会按"未处理"直接终止进程，
+    /// CAD 那边的表现就是一条"致命错误"。接住它之后最坏只是某个按钮失效，进程和图纸都还在。</para></summary>
+    internal static class WpfGuard
+    {
+        private static bool _installed;
+
+        internal static void Install()
+        {
+            if (_installed) return;
+            _installed = true;
+            try
+            {
+                Dispatcher.CurrentDispatcher.UnhandledException += (s, e) =>
+                {
+                    PluginLog.Error("WPF.UnhandledException", e.Exception);
+                    e.Handled = true;
+                    try
+                    {
+                        var doc = CadApplication.DocumentManager.MdiActiveDocument;
+                        if (doc != null)
+                            doc.Editor.WriteMessage("\nX-批注界面出错（已记录日志）：" + e.Exception.Message);
+                    }
+                    catch (Exception) { }
+                };
+            }
+            catch (Exception ex) { PluginLog.Warning("WpfGuard.Install", ex.Message); }
         }
     }
 }

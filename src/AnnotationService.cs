@@ -94,19 +94,34 @@ namespace XAnnotation
         /// 面板中改外形/选项能立刻反映到预览上。</para></summary>
         public static bool PromptGeometry(Document doc, AnnotationSettings s, out Point3d firstPoint, out Point3d secondPoint)
         {
-            // 进入交互前先识别一次图面单位（要开事务扫文字，不能放在拖拽回调里）。
-            DrawingScale.Ensure(doc);
-            firstPoint=Point3d.Origin;secondPoint=Point3d.Origin;var ed = doc.Editor;object ortho=null,osmode=null;
-            try{
-                if(s.AutoCloseOrtho){ortho=CadSystemVariable("ORTHOMODE");SetCadSystemVariable("ORTHOMODE",0);}if(s.AutoCloseSnap){osmode=CadSystemVariable("OSMODE");SetCadSystemVariable("OSMODE",0);}
-                var firstJig=new FirstCornerPromptJig("\n指定批注范围第一个角点: ");
-                var firstResult=ed.Drag(firstJig);
-                if(firstJig.Aborted){ed.WriteMessage("\n绘制选项已更改，本轮按新选项重新开始。");return false;}
-                if(firstResult.Status!=PromptStatus.OK)return false;
+            firstPoint = Point3d.Origin; secondPoint = Point3d.Origin;
+            // 入口守卫：文档/编辑器拿不到时直接退出，别把 null 带进 Drag（现场出现过
+            // "[X_PZ_DRAW] NullReferenceException 在 PromptGeometry"，栈里只有这一层，
+            // 说明是在这一句里炸的，正好对应"从清单点新建批注没反应"）。
+            if (doc == null || doc.IsDisposed) { PluginLog.Warning("PromptGeometry", "没有可用的图纸，已取消。"); return false; }
+            var ed = doc.Editor;
+            if (ed == null) { PluginLog.Warning("PromptGeometry", "文档没有可用的编辑器（Editor 为空），已取消。"); return false; }
+            if (s == null) s = SettingsStore.Load();
+
+            object ortho = null, osmode = null;
+            var step = "识别图面单位";
+            try
+            {
+                // 进入交互前先识别一次图面单位（要开事务扫文字，不能放在拖拽回调里）。
+                DrawingScale.Ensure(doc);
+                step = "关闭正交/捕捉";
+                if (s.AutoCloseOrtho) { ortho = CadSystemVariable("ORTHOMODE"); SetCadSystemVariable("ORTHOMODE", 0); }
+                if (s.AutoCloseSnap) { osmode = CadSystemVariable("OSMODE"); SetCadSystemVariable("OSMODE", 0); }
+                step = "取第一个角点";
+                var firstJig = new FirstCornerPromptJig("\n指定批注范围第一个角点: ");
+                var firstResult = ed.Drag(firstJig);
+                if (firstJig.Aborted) { ed.WriteMessage("\n绘制选项已更改，本轮按新选项重新开始。"); return false; }
+                if (firstResult.Status != PromptStatus.OK) return false;
                 // 拖拽 Jig 的采样点本身已经是 WCS（见 FirstCornerPromptJig 的注释，MoveAnnotation 也按 WCS 用），
                 // 这里**不能再乘 UCS 矩阵**：图纸带旋转/远原点 UCS（总图很常见，UCS 原点在几百万的测量坐标上）时，
                 // 乘一次就会把点甩到几百万单位之外，框选范围被撑成"巨无霸"，云线看着就像比例全错。
-                var firstWcs=firstJig.Current;
+                var firstWcs = firstJig.Current;
+                step = "拖拽云线范围";
                 var region=new RegionPreviewJig(doc,firstWcs,s);PromptResult regionResult;try{regionResult=ed.Drag(region);}finally{PreviewTransient.Clear();}
                 if(region.Aborted){ed.WriteMessage("\n绘制选项已更改，本轮按新选项重新开始。");return false;}
                 if(regionResult.Status!=PromptStatus.OK)return false;
@@ -118,7 +133,21 @@ namespace XAnnotation
                     region.Current.X.ToString("0.###") + "," + region.Current.Y.ToString("0.###") + ")  UCS 对齐尺寸=" +
                     regionWidth.ToString("0.###") + "x" + regionHeight.ToString("0.###"));
                 firstPoint=firstWcs;secondPoint=region.Current;return true;
-            }finally{if(ortho!=null)SetCadSystemVariable("ORTHOMODE",ortho);if(osmode!=null)SetCadSystemVariable("OSMODE",osmode);}
+            }
+            catch (System.Exception ex)
+            {
+                // 带上"卡在哪一步"：以前只写 PromptGeometry，栈里看不出是选点、拖拽还是换算出的错。
+                PluginLog.Error("PromptGeometry[" + step + "]", ex);
+                try { ed.WriteMessage("\n绘制批注失败（" + step + "）：" + ex.Message); } catch (System.Exception) { }
+                return false;
+            }
+            finally
+            {
+                try { if (ortho != null) SetCadSystemVariable("ORTHOMODE", ortho); }
+                catch (System.Exception ex) { PluginLog.Warning("PromptGeometry.RestoreOrtho", ex.Message); }
+                try { if (osmode != null) SetCadSystemVariable("OSMODE", osmode); }
+                catch (System.Exception ex) { PluginLog.Warning("PromptGeometry.RestoreOsnap", ex.Message); }
+            }
         }
 
         /// <summary>交互式选点（仅云线）：第一角点 → 拖拽云线范围，不要求文字框位置。</summary>
@@ -2379,29 +2408,52 @@ namespace XAnnotation
 
         /// <summary>只改批注状态（列表里的「标记已处理」等快捷操作）。
         /// <para>走 <see cref="Update"/> 而不是直接改写 XRecord：状态着色、"已回复/已完成"整条换色、
-        /// 变更留痕都在 Update 里，绕过去会让图面颜色和记录对不上。</para></summary>
-        public static bool SetStatus(Document doc, ObjectId entityId, string status)
+        /// 变更留痕都在 Update 里，绕过去会让图面颜色和记录对不上。</para>
+        /// <para>返回值是<b>失败原因</b>（空串/ null = 成功），供界面直接告诉用户卡在哪一步；
+        /// <paramref name="changed"/> 表示图上是否真的改了。</para></summary>
+        public static string SetStatus(Document doc, ObjectId entityId, string status, out bool changed)
         {
-            if (doc == null || doc.IsDisposed || entityId.IsNull || !entityId.IsValid || entityId.IsErased) return false;
-            if (string.IsNullOrWhiteSpace(status)) return false;
+            changed = false;
+            if (doc == null || doc.IsDisposed) return "当前没有可用的图纸。";
+            if (entityId.IsNull || !entityId.IsValid) return "批注实体已不存在，请刷新列表。";
+            if (entityId.IsErased) return "批注已经被删除，请刷新列表。";
+            if (string.IsNullOrWhiteSpace(status)) return "状态值为空。";
             try
             {
                 AnnotationData data;
                 using (doc.LockDocument())
                 using (var tr = doc.Database.TransactionManager.StartTransaction())
                 {
-                    if (!(tr.GetObject(entityId, OpenMode.ForRead) is Entity entity)) return false;
-                    if (!TryReadFromEntity(tr, entity, out data) || data == null) return false;
+                    if (!(tr.GetObject(entityId, OpenMode.ForRead) is Entity entity)) return "批注实体已不存在，请刷新列表。";
+                    if (!TryReadFromEntity(tr, entity, out data) || data == null)
+                    {
+                        PluginLog.Warning("AnnotationSetStatus", "实体 " + entityId + " 找不到批注数据（编组与 XData 都读不出来）。");
+                        return "这条批注的数据读不出来（编组可能已被炸开），可先运行 X_PZ_REPAIR 修复。";
+                    }
                     tr.Commit();
                 }
-                if (string.Equals(data.Status, status, StringComparison.Ordinal)) return true;
+
+                if (string.Equals(data.Status, status, StringComparison.Ordinal))
+                {
+                    changed = true;           // 已经是这个状态：当作成功，界面不必报错
+                    return "";
+                }
+
                 data.Status = status;
-                return Update(doc, entityId, data);
+                if (!Update(doc, entityId, data))
+                {
+                    PluginLog.Warning("AnnotationSetStatus", "Update 返回 false（实体=" + entityId + "，目标状态=" + status + "）。");
+                    return "编辑这条批注失败（编组内容不完整），可先运行 X_PZ_REPAIR 修复。";
+                }
+
+                changed = true;
+                try { doc.Editor.UpdateScreen(); } catch (System.Exception) { }
+                return "";
             }
             catch (System.Exception ex)
             {
                 PluginLog.Error("AnnotationSetStatus", ex);
-                return false;
+                return ex.Message;
             }
         }
 
