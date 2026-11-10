@@ -36,7 +36,7 @@ namespace XAnnotation
         internal const string ToolbarName = "X-批注";
 
         /// <summary>单个工具栏按钮：图标单字 / 按钮名 / 悬停提示 / 命令。</summary>
-        private sealed class ToolbarButtonSpec
+        internal sealed class ToolbarButtonSpec
         {
             public string Glyph;
             public string Name;
@@ -47,7 +47,7 @@ namespace XAnnotation
         /// <summary>按钮清单（快捷栏已取消，工具栏是唯一入口）。
         /// "批"指向 X_PZ_NOTE（弹出功能选择框：选外形/连续绘制/多对一/仅绘云线，并可跳转批注设置）；
         /// "快"指向 X_PZ_DRAW（快速直绘，不弹功能选择框，按当前设置直接框选绘制）。</summary>
-        private static readonly ToolbarButtonSpec[] Buttons =
+        internal static readonly ToolbarButtonSpec[] Buttons =
         {
             new ToolbarButtonSpec { Glyph = "批", Name = "批注", Help = "批注绘制：弹出功能选择框（选外形/连续绘制/多对一批注，可跳批注设置）", Command = "X_PZ_NOTE" },
             new ToolbarButtonSpec { Glyph = "快", Name = "快速直绘", Help = "快速直绘：不弹功能选择框，框选云线范围 → 放文字框 → 填写内容", Command = "X_PZ_DRAW" },
@@ -65,6 +65,41 @@ namespace XAnnotation
             new ToolbarButtonSpec { Glyph = "入", Name = "导入", Help = "导入批注 (CSV)", Command = "X_PZ_IMPORT" },
             new ToolbarButtonSpec { Glyph = "历", Name = "历史", Help = "批注历史记录（留痕）", Command = "X_PZ_HISTORY" },
         };
+
+        /// <summary>按钮数量（CUI 生成时用来判断 cuix 要不要重建）。</summary>
+        internal static int ButtonCount
+        {
+            get { return Buttons.Length; }
+        }
+
+        /// <summary>宿主 <c>MenuGroups</c> COM 对象（CUI 生成器复用，免得它自己去碰宿主类型）。</summary>
+        internal static object GetMenuGroupsStatic()
+        {
+            try { return MenuInstaller.GetStatic(typeof(UiApplication), "MenuGroups"); }
+            catch { return null; }
+        }
+
+        /// <summary>宿主 <c>AcadApplication</c> 对象（读 Support 目录要用）。</summary>
+        internal static object GetAcadApplicationObject()
+        {
+            return ResolveAcadApplication();
+        }
+
+        /// <summary>宿主版本串（如 <c>"24.1s (LMS Tech)"</c>），CUI 里写版本号用。</summary>
+        internal static string HostVersion
+        {
+            get
+            {
+                try { return Convert.ToString(CadApplication.Version) ?? ""; }
+                catch { return ""; }
+            }
+        }
+
+        /// <summary>按钮清单（CUI 生成器按同一份清单生成工具栏，改按钮只改这一处）。</summary>
+        internal static ToolbarButtonSpec[] GetButtons()
+        {
+            return Buttons;
+        }
 
         private static bool _retryAttached;
         private static int _retryCount;
@@ -207,9 +242,24 @@ namespace XAnnotation
             message = "浩辰暂不创建工具栏（菜单已可用；命令名 X_PZ_* 也可直接使用）。";
             return false;
 #else
+#if AUTOCAD
+            // AutoCAD 平台优先走 CUI 正式工具栏：宿主会把它的停靠位置/列内次序记进工作空间，
+            // 用户拖到侧边竖排、重启后还在原处。COM 建法做不到这一点（Dock 一律插到该边最前面），
+            // 见 ToolbarCui 的说明。CUI 不可用时**退回** COM 建法，宁可不记位置也不能让工具栏消失。
+            string cuiMessage;
+            if (ToolbarCui.Ensure(out cuiMessage))
+            {
+                // 同一个会话里如果还留着旧版用 COM 建的同名工具栏（升级后没重启的情况），
+                // 会出现两条「X-批注」。顺手删掉那一条 —— 删失败也无所谓，重启后就没了。
+                RemoveLegacyComToolbar();
+                message = cuiMessage;
+                return true;
+            }
+            PluginLog.Warning("Toolbar.Cui", "CUI 方案不可用，改用 COM 建法（位置可能记不住）：" + cuiMessage);
+#endif
             try
             {
-                var toolbars = GetToolbarsCollection();
+                var toolbars = GetToolbarsCollection(null);
                 if (toolbars == null) { message = "当前 CAD 未公开工具栏接口。"; return false; }
 
                 var created = false;
@@ -264,7 +314,13 @@ namespace XAnnotation
         {
             try
             {
-                var toolbars = GetToolbarsCollection();
+#if AUTOCAD
+                // CUI 工具栏挂在插件自己的菜单组里，不在宿主默认的 "Acad" 组；先找自己的组，
+                // 找不到（CUI 没加载成功、走的是 COM 建法）再回落到默认组。
+                var toolbars = GetToolbarsCollection(ToolbarCui.MenuGroupName) ?? GetToolbarsCollection(null);
+#else
+                var toolbars = GetToolbarsCollection(null);
+#endif
                 if (toolbars == null) { message = "当前 CAD 未公开工具栏接口。"; return false; }
                 var toolbar = TryGetToolbar(toolbars);
                 if (toolbar == null) return Ensure(out message);
@@ -282,8 +338,25 @@ namespace XAnnotation
             }
         }
 
-        /// <summary>取当前宿主菜单组下的 Toolbars 集合 COM 对象；宿主不支持时返回 <c>null</c>。</summary>
-        private static object GetToolbarsCollection()
+        /// <summary>删掉旧版用 COM 建的同名工具栏。只在改用 CUI 工具栏后调用，
+        /// 只查宿主默认菜单组（CUI 工具栏挂在插件自己的组里，不会误删）。</summary>
+        private static void RemoveLegacyComToolbar()
+        {
+            try
+            {
+                var toolbars = GetToolbarsCollection(null);
+                if (toolbars == null) return;
+                var legacy = TryGetToolbar(toolbars);
+                if (legacy == null) return;
+                legacy.InvokeMethod("Delete");
+                PluginLog.Info("Toolbar.Legacy", "已删除旧版 COM 工具栏（改用 CUI 工具栏）。");
+            }
+            catch (Exception ex) { PluginLog.Warning("Toolbar.Legacy", Describe(ex)); }
+        }
+
+        /// <summary>取某个菜单组下的 Toolbars 集合 COM 对象；宿主不支持时返回 <c>null</c>。
+        /// <paramref name="groupName"/> 为 <c>null</c> 时用宿主默认组（AutoCAD 是 "Acad"，中望取第一个）。</summary>
+        private static object GetToolbarsCollection(string groupName)
         {
 #if GSCAD
             // 浩辰：**不碰 MenuGroups**。它在这个宿主 + .NET 8 下读 Count 必抛 AccessViolationException
@@ -293,12 +366,28 @@ namespace XAnnotation
 #else
             var menuGroups = MenuInstaller.GetStatic(typeof(UiApplication), "MenuGroups");
             if (menuGroups == null) return null;
+            object group;
+            try
+            {
 #if ZWCAD
-            var group = menuGroups.InvokeMethod("Item", 0);
+                group = string.IsNullOrEmpty(groupName)
+                    ? menuGroups.InvokeMethod("Item", 0)
+                    : menuGroups.InvokeMethod("Item", groupName);
 #else
-            var group = menuGroups.InvokeMethod("Item", "Acad");
+                group = menuGroups.InvokeMethod("Item", string.IsNullOrEmpty(groupName) ? "Acad" : groupName);
 #endif
-            return group?.GetProperty("Toolbars");
+            }
+            catch (TargetInvocationException)
+            {
+                // 按名查不到菜单组时 COM 会抛 —— 对调用方来说等价于"这条路上没有工具栏"。
+                return null;
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+            if (group == null) return null;
+            return group.GetProperty("Toolbars");
 #endif
         }
 
@@ -650,7 +739,7 @@ namespace XAnnotation
         /// 那样浅色/深色主题下都是同一块白底，字永远看得清）。
         /// **缓存文件名带样式版本号（tb_v3_）且按"字的码位+尺寸"命名**：改画风只须升版本号即可让旧缓存全部失效；
         /// 码位命名保证按钮增删移位不会出现"例"按钮显示"出"字这类错位；小/大图标要分别有文件（SetBitmaps 两个参数各要一个路径）。</summary>
-        private static string TryCreateIcon(string glyph, int size)
+        internal static string TryCreateIcon(string glyph, int size)
         {
             try
             {
