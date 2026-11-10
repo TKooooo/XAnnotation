@@ -2158,7 +2158,8 @@ namespace XAnnotation
             return entries; // GetAllAnnotations 已按编号排序
         }
 
-        /// <summary>轻量批注摘要，供列表面板展示。</summary>
+        /// <summary>轻量批注摘要，供列表面板展示。
+        /// <para>只读快照：列表每次刷新都整体重建，不实现 INotifyPropertyChanged。</para></summary>
         public sealed class AnnotationInfo
         {
             public string Id { get; set; }
@@ -2169,8 +2170,75 @@ namespace XAnnotation
             public string Date { get; set; }
             public string Status { get; set; }
             public string Content { get; set; }
+            /// <summary>图号（批注里登记的那一格，可能为空）。</summary>
+            public string DrawingNo { get; set; }
+            /// <summary>所在布局名（模型 / 布局1…），取不到为 null。</summary>
+            public string Layout { get; set; }
+            /// <summary>批注实体所在图层。</summary>
+            public string Layer { get; set; }
+            /// <summary>这条批注由哪些元素组成（cloud/box/leader/marker/text 的角色名集合）。</summary>
+            public List<string> ElementRoles { get; set; }
+            /// <summary>列表里的流水号（1 起，按编号数值排序后固定，筛选时不变）。</summary>
+            public int Seq { get; set; }
             public ObjectId GroupId { get; set; }
             public ObjectId FirstEntityId { get; set; }
+
+            /// <summary>组成元素的人话说明（"云线 · 文字框 · 引线"），详情区显示用。</summary>
+            public string ElementText
+            {
+                get
+                {
+                    if (ElementRoles == null || ElementRoles.Count == 0) return "—";
+                    var names = new List<string>();
+                    foreach (var role in ElementRoles)
+                    {
+                        var name = role == "cloud" ? "云线"
+                            : role == "box" ? "文字框"
+                            : role == "leader" ? "引线"
+                            : role == "marker" ? "基点"
+                            : role == "text" ? "文字"
+                            : role;
+                        if (!names.Contains(name)) names.Add(name);
+                    }
+                    return string.Join(" · ", names.ToArray());
+                }
+            }
+
+            /// <summary>意见摘要：正文压成一行（换行/连续空格折成单个空格），超长由界面省略号截断。</summary>
+            public string Summary
+            {
+                get
+                {
+                    var text = (Content ?? "").Replace("\\P", " ").Replace("\r", " ").Replace("\n", " ").Replace("\t", " ");
+                    while (text.IndexOf("  ", StringComparison.Ordinal) >= 0) text = text.Replace("  ", " ");
+                    return text.Trim();
+                }
+            }
+
+            /// <summary>图号为空时显示一个占位符，列里不会出现空白格。</summary>
+            public string DrawingNoDisplay
+            {
+                get { return string.IsNullOrWhiteSpace(DrawingNo) ? "—" : DrawingNo.Trim(); }
+            }
+
+            /// <summary>批注指纹（Id 前 8 位大写），排查"同编号多条/复制出来的批注"时用。</summary>
+            public string Fingerprint
+            {
+                get
+                {
+                    var id = Id ?? "";
+                    return id.Length <= 8 ? id.ToUpperInvariant() : id.Substring(0, 8).ToUpperInvariant();
+                }
+            }
+
+            /// <summary>是否属于给定状态分组（"待处理" 分组也接收空值/未知状态，免得旧批注在列表里"消失"）。</summary>
+            public bool IsStatus(string status)
+            {
+                if (string.IsNullOrEmpty(status)) return true;
+                if (string.Equals(status, "待处理", StringComparison.Ordinal))
+                    return string.IsNullOrWhiteSpace(Status) || string.Equals(Status, "待处理", StringComparison.Ordinal);
+                return string.Equals(Status, status, StringComparison.Ordinal);
+            }
         }
 
         /// <summary>扫描当前 DWG 中现有批注编号，返回最大「X-」编号+1（无批注时=1）。</summary>
@@ -2238,6 +2306,7 @@ namespace XAnnotation
             {
                 using (var tr = doc.Database.TransactionManager.StartTransaction())
                 {
+                    var layoutCache = new Dictionary<ObjectId, string>();
                     var groups = (DBDictionary)tr.GetObject(doc.Database.GroupDictionaryId, OpenMode.ForRead);
                     foreach (var entry in groups)
                     {
@@ -2247,19 +2316,93 @@ namespace XAnnotation
                         if (!TryReadMaster(group, tr, out var data)) continue;
                         var ids = group.GetAllEntityIds();
                         ObjectId firstId = ObjectId.Null;
-                        foreach (ObjectId oid in ids) { if (oid.IsValid && !oid.IsErased) { firstId = oid; break; } }
+                        var roles = new List<string>();
+                        foreach (ObjectId oid in ids)
+                        {
+                            if (!oid.IsValid || oid.IsErased) continue;
+                            if (firstId.IsNull) firstId = oid;
+                            // 顺手统计组成元素（详情区要显示"云线 · 文字框 · 引线"）；读不到就跳过。
+                            if (roles.Count < 6)
+                            {
+                                try
+                                {
+                                    if (tr.GetObject(oid, OpenMode.ForRead, false) is Entity member
+                                        && TryGetRole(member, out var memberRole)
+                                        && !string.IsNullOrEmpty(memberRole) && !roles.Contains(memberRole))
+                                    {
+                                        roles.Add(memberRole);
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
                         if(firstId.IsNull)continue;
+                        // 图层 / 布局是"这条批注落在哪"的信息，列表详情要用；取不到不影响列表本身。
+                        string layer = null, layout = null;
+                        try
+                        {
+                            if (tr.GetObject(firstId, OpenMode.ForRead, false) is Entity first)
+                            {
+                                layer = first.Layer;
+                                layout = LayoutNameOf(tr, first, layoutCache);
+                            }
+                        }
+                        catch { }
                         result.Add(new AnnotationInfo
                         {
                             Id = data.Id, Number = data.Number, Discipline = data.Discipline,
                             Author = data.Author, Role = data.Role, Date = data.Date, Status = data.Status,
-                            Content = data.Content, GroupId = group.ObjectId, FirstEntityId = firstId
+                            Content = data.Content, DrawingNo = data.DrawingNo,
+                            Layer = layer, Layout = layout, ElementRoles = roles,
+                            GroupId = group.ObjectId, FirstEntityId = firstId
                         });
                     }
                 }
             }
             catch { }
-            return result.OrderBy(x => x.Number, StringComparer.OrdinalIgnoreCase).ToList();
+            // 按编号里的数字排（X-2 排在 X-10 前面），字符串排序会把它排到后面去。
+            var ordered = result
+                .OrderBy(x => NumberValue(x.Number))
+                .ThenBy(x => x.Number ?? "", StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            for (var i = 0; i < ordered.Count; i++) ordered[i].Seq = i + 1;
+            return ordered;
+        }
+
+        /// <summary>取编号里的数字部分（"X-012" → 12）。解析不出来时排到最后。</summary>
+        private static int NumberValue(string number)
+        {
+            if (string.IsNullOrEmpty(number)) return int.MaxValue;
+            var digits = new string(number.Where(char.IsDigit).ToArray());
+            return int.TryParse(digits, out var value) ? value : int.MaxValue;
+        }
+
+        /// <summary>只改批注状态（列表里的「标记已处理」等快捷操作）。
+        /// <para>走 <see cref="Update"/> 而不是直接改写 XRecord：状态着色、"已回复/已完成"整条换色、
+        /// 变更留痕都在 Update 里，绕过去会让图面颜色和记录对不上。</para></summary>
+        public static bool SetStatus(Document doc, ObjectId entityId, string status)
+        {
+            if (doc == null || doc.IsDisposed || entityId.IsNull || !entityId.IsValid || entityId.IsErased) return false;
+            if (string.IsNullOrWhiteSpace(status)) return false;
+            try
+            {
+                AnnotationData data;
+                using (doc.LockDocument())
+                using (var tr = doc.Database.TransactionManager.StartTransaction())
+                {
+                    if (!(tr.GetObject(entityId, OpenMode.ForRead) is Entity entity)) return false;
+                    if (!TryReadFromEntity(tr, entity, out data) || data == null) return false;
+                    tr.Commit();
+                }
+                if (string.Equals(data.Status, status, StringComparison.Ordinal)) return true;
+                data.Status = status;
+                return Update(doc, entityId, data);
+            }
+            catch (System.Exception ex)
+            {
+                PluginLog.Error("AnnotationSetStatus", ex);
+                return false;
+            }
         }
 
         /// <summary>

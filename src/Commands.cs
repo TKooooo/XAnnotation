@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using XAnnotation.Views;
@@ -614,7 +614,7 @@ namespace XAnnotation
             SettingsWindow.ShowOrActivate(SettingsWindow.SharedSettings(), styles);
         }
 
-        /// <summary>打开批注列表面板（左侧停靠）。</summary>
+        /// <summary>打开批注清单（表格 + 筛选 + 搜索 + 详情，居中显示）。</summary>
         [CommandMethod("X_PZ_LIST", CommandFlags.Modal)]
         public void AnnotationList()
         {
